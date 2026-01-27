@@ -34,22 +34,7 @@ if meson.version().version_compare('>=0.51.0')
 
     libmicrohttpd_dep = dependency('libmicrohttpd', version: '>=0.9.40')
 
-    cmake = import('cmake')
-# Ubuntu Bionic cannot parse meson's dictionary
-# because the meson version is less than v0.47.0.
-#
-# We will change to using meson's dictionary
-# after April 2023 when Ubuntu bionic is deprecated.
-#
-#    if meson.version().version_compare('>=0.55.0')
-#      opt_var = cmake.subproject_options()
-#      opt_var.add_cmake_defines({'CMAKE_INSTALL_LIBDIR': libdir})
-#      prometheus_client_c_proj = cmake.subproject(
-#        'prometheus-client-c', options: opt_var)
-#    else
-#      prometheus_client_c_proj = cmake.subproject('prometheus-client-c')
-#    endif
-    prometheus_client_c_proj = cmake.subproject('prometheus-client-c')
+    prometheus_client_c_proj = subproject('prometheus-client-c')
 
 #
 # @acetcom
@@ -66,7 +51,7 @@ if meson.version().version_compare('>=0.51.0')
 #    else
 #        run_command('mkdir', '-p', missing_include_dir)
 #    endif
-    libprom_dep = prometheus_client_c_proj.dependency('prom')
+    libprom_dep = prometheus_client_c_proj.get_variable('prom_dep')
 
     libmetrics_dependencies = libmetrics_dependencies + [libprom_dep, libmicrohttpd_dep]
     libmetrics_file_list = libmetrics_file_list + ' prometheus/context.c'
