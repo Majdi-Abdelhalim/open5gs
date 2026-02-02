@@ -5,6 +5,9 @@ logger:
 test:
   serving:
     - plmn_id:
+        mcc: 999
+        mnc: 70
+    - plmn_id:
         mcc: 001
         mnc: 01
 
@@ -157,6 +160,7 @@ amf:
   ngap:
     server:
       - address: 127.0.1.5
+      - address: 127.0.2.5
   metrics:
     server:
       - address: 127.0.0.5

@@ -19,6 +19,34 @@
 
 #include "test-common.h"
 
+/*
+ * Helper function to switch PLMN context for NG-Setup and NAS signaling.
+ * This updates all PLMN-related fields that affect NG-Setup Request
+ * and NAS message building.
+ *
+ * @param plmn_index: Index into ogs_local_conf()->serving_plmn_id[] array
+ *                    0 = Home PLMN (999-70 from config)
+ *                    1 = Visiting PLMN (001-01 from config)
+ */
+static void switch_plmn_context(int plmn_index)
+{
+    ogs_plmn_id_t *plmn_id;
+
+    ogs_assert(plmn_index < ogs_local_conf()->num_of_serving_plmn_id);
+    plmn_id = &ogs_local_conf()->serving_plmn_id[plmn_index];
+
+    /* Update gNB's PLMN support for NG-Setup */
+    memcpy(&test_self()->plmn_support[0].plmn_id, plmn_id, OGS_PLMN_ID_LEN);
+
+    /* Update TAI for NG-Setup */
+    memcpy(&test_self()->nr_tai.plmn_id, plmn_id, OGS_PLMN_ID_LEN);
+    memcpy(&test_self()->nr_cgi.plmn_id, plmn_id, OGS_PLMN_ID_LEN);
+
+    /* Update served TAI list for NG-Setup */
+    memcpy(&test_self()->nr_served_tai[0].list0.tai[0].plmn_id, 
+           plmn_id, OGS_PLMN_ID_LEN);
+}
+
 static void test1_func(abts_case *tc, void *data)
 {
     int rv;
@@ -41,8 +69,13 @@ static void test1_func(abts_case *tc, void *data)
 
     bson_t *doc = NULL;
 
-    /* Set home PLMN to 999-70 BEFORE creating test UE for correct SUCI */
-    ogs_plmn_id_build(&ogs_local_conf()->serving_plmn_id, 999, 70, 2);
+    /* 
+     * Verify config has both PLMNs:
+     *   serving_plmn_id[0] = Home PLMN (999-70)
+     *   serving_plmn_id[1] = Visiting PLMN (001-01)
+     * These are read from test.serving[] in gnb-999-70-ue-001-01.yaml
+     */
+    ogs_assert(ogs_local_conf()->num_of_serving_plmn_id >= 2);
 
     /* Setup Test UE & Session Context */
     memset(&mobile_identity_suci, 0, sizeof(mobile_identity_suci));
@@ -75,27 +108,23 @@ static void test1_func(abts_case *tc, void *data)
     ABTS_INT_EQUAL(tc, OGS_OK, test_db_insert_ue(test_ue, doc));
 
     /**************************************************************************
-     * PHASE 1: HOME NETWORK REGISTRATION (PLMN 999-70)
+     * PHASE 1: HOME NETWORK REGISTRATION (PLMN from config index 0)
+     * Config: test.serving[0].plmn_id = 999-70 (Home)
+     *         amf.ngap.server[0] = 127.0.1.5 (Home AMF)
      **************************************************************************/
 
-    /* Home gNB connects to Home AMF (127.0.1.5) */
-    ngap_home = testsctp_client("127.0.1.5", OGS_NGAP_SCTP_PORT);
+    /* Home gNB connects to Home AMF (from config: ngap_addr) */
+    ngap_home = testngap_client(1, AF_INET);
     ABTS_PTR_NOTNULL(tc, ngap_home);
 
     /* Home gNB connects to Home UPF */
     gtpu_home = test_gtpu_server(1, AF_INET);
     ABTS_PTR_NOTNULL(tc, gtpu_home);
 
-    /* Update test context to use home PLMN (999-70) for NG-Setup */
-    ogs_plmn_id_build(&test_self()->plmn_support[0].plmn_id, 999, 70, 2);
-    ogs_plmn_id_build(&test_self()->nr_tai.plmn_id, 999, 70, 2);
-    memcpy(&test_self()->nr_cgi.plmn_id, &test_self()->nr_tai.plmn_id,
-            OGS_PLMN_ID_LEN);
-    ogs_plmn_id_build(&test_self()->nr_served_tai[0].list0.tai[0].plmn_id, 
-            999, 70, 2);
-    ogs_plmn_id_build(&ogs_local_conf()->serving_plmn_id, 999, 70, 2);
+    /* Switch to home PLMN context (index 0) for NG-Setup */
+    switch_plmn_context(0);
 
-    /* Send NG-Setup Request to Home AMF (PLMN 999-70) */
+    /* Send NG-Setup Request to Home AMF */
     sendbuf = testngap_build_ng_setup_request(0x4000, 22);
     ABTS_PTR_NOTNULL(tc, sendbuf);
     rv = testgnb_ngap_send(ngap_home, sendbuf);
@@ -332,27 +361,23 @@ static void test1_func(abts_case *tc, void *data)
     qos_flow = NULL;
 
     /**************************************************************************
-     * PHASE 2: ROAMING NETWORK REGISTRATION (PLMN 001-01)
+     * PHASE 2: ROAMING NETWORK REGISTRATION (PLMN from config index 1)
+     * Config: test.serving[1].plmn_id = 001-01 (Visiting)
+     *         amf.ngap.server[1] = 127.0.2.5 (Visiting AMF)
      **************************************************************************/
 
-    /* Roaming gNB connects to Visiting AMF (127.0.2.5) */
-    ngap_roaming = testsctp_client("127.0.2.5", OGS_NGAP_SCTP_PORT);
+    /* Roaming gNB connects to Visiting AMF (from config: ngap2_addr) */
+    ngap_roaming = testngap_client(2, AF_INET);
     ABTS_PTR_NOTNULL(tc, ngap_roaming);
 
     /* Roaming gNB connects to Visiting UPF */
     gtpu_roaming = test_gtpu_server(2, AF_INET);
     ABTS_PTR_NOTNULL(tc, gtpu_roaming);
 
-    /* Update test context to use visiting PLMN (001-01) for NG-Setup */
-    ogs_plmn_id_build(&test_self()->plmn_support[0].plmn_id, 1, 1, 2);
-    ogs_plmn_id_build(&test_self()->nr_tai.plmn_id, 1, 1, 2);
-    memcpy(&test_self()->nr_cgi.plmn_id, &test_self()->nr_tai.plmn_id,
-            OGS_PLMN_ID_LEN);
-    ogs_plmn_id_build(&test_self()->nr_served_tai[0].list0.tai[0].plmn_id, 
-            1, 1, 2);
-    ogs_plmn_id_build(&ogs_local_conf()->serving_plmn_id, 1, 1, 2);
+    /* Switch to visiting PLMN context (index 1) for NG-Setup */
+    switch_plmn_context(1);
 
-    /* Send NG-Setup Request to Visiting AMF (PLMN 001-01) */
+    /* Send NG-Setup Request to Visiting AMF */
     sendbuf = testngap_build_ng_setup_request(0x4001, 22);
     ABTS_PTR_NOTNULL(tc, sendbuf);
     rv = testgnb_ngap_send(ngap_roaming, sendbuf);
