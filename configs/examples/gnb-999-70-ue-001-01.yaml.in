@@ -10,6 +10,11 @@ test:
     - plmn_id:
         mcc: 001
         mnc: 01
+  subscriber:
+    # Roaming mode for test UEs:
+    #   true  = Local Breakout (LBO) - traffic exits at V-SMF in visited network
+    #   false = Home Routed - traffic goes through SEPP to H-SMF in home network
+    lbo_roaming_allowed: false
 
 global:
   parameter:

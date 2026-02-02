@@ -997,6 +997,36 @@ int test_context_parse_config(void)
                     }
                 }
             }
+        } else if (!strcmp(root_key, "test")) {
+            ogs_yaml_iter_t test_iter;
+            ogs_yaml_iter_recurse(&root_iter, &test_iter);
+            while (ogs_yaml_iter_next(&test_iter)) {
+                const char *test_key = ogs_yaml_iter_key(&test_iter);
+                ogs_assert(test_key);
+                if (!strcmp(test_key, "subscriber")) {
+                    ogs_yaml_iter_t subscriber_iter;
+                    ogs_yaml_iter_recurse(&test_iter, &subscriber_iter);
+                    while (ogs_yaml_iter_next(&subscriber_iter)) {
+                        const char *subscriber_key =
+                            ogs_yaml_iter_key(&subscriber_iter);
+                        ogs_assert(subscriber_key);
+                        if (!strcmp(subscriber_key, "lbo_roaming_allowed")) {
+                            const char *v =
+                                ogs_yaml_iter_value(&subscriber_iter);
+                            if (v) {
+                                if (!strcasecmp(v, "true") ||
+                                        !strcasecmp(v, "yes") ||
+                                        !strcasecmp(v, "1")) {
+                                    self.default_lbo_roaming_allowed = true;
+                                } else {
+                                    self.default_lbo_roaming_allowed = false;
+                                }
+                            }
+                        } else
+                            ogs_warn("unknown key `%s`", subscriber_key);
+                    }
+                }
+            }
         }
     }
 
@@ -1599,11 +1629,7 @@ bson_t *test_db_new_simple(test_ue_t *test_ue)
                             "pre_emption_capability", BCON_INT32(1),
                         "}",
                     "}",
-#if 0
-                    "lbo_roaming_allowed", BCON_BOOL(true),
-#else
-                    "lbo_roaming_allowed", BCON_BOOL(false),
-#endif
+                    "lbo_roaming_allowed", BCON_BOOL(test_ue->lbo_roaming_allowed),
                 "}", "]",
             "}", "]",
             "security", "{",
@@ -1709,11 +1735,7 @@ bson_t *test_db_new_qos_flow(test_ue_t *test_ue)
                                  "description", BCON_UTF8("permit out udp from 10.200.136.98/32 1-65535 to assigned 50021"), "}",
                         "]",
                     "}", "]",
-#if 0
-                    "lbo_roaming_allowed", BCON_BOOL(true),
-#else
-                    "lbo_roaming_allowed", BCON_BOOL(false),
-#endif
+                    "lbo_roaming_allowed", BCON_BOOL(test_ue->lbo_roaming_allowed),
                 "}", "]",
             "}", "]",
             "security", "{",
@@ -1815,11 +1837,7 @@ bson_t *test_db_new_qos_flow_bi_directional(test_ue_t *test_ue)
                                  "description", BCON_UTF8("permit out udp from 10.200.136.98/32 23455 to assigned 1-65535"), "}",
                         "]",
                     "}", "]",
-#if 0
-                    "lbo_roaming_allowed", BCON_BOOL(true),
-#else
-                    "lbo_roaming_allowed", BCON_BOOL(false),
-#endif
+                    "lbo_roaming_allowed", BCON_BOOL(test_ue->lbo_roaming_allowed),
                 "}", "]",
             "}", "]",
             "security", "{",
@@ -1886,11 +1904,7 @@ bson_t *test_db_new_session(test_ue_t *test_ue)
                             "pre_emption_capability", BCON_INT32(1),
                         "}",
                     "}",
-#if 0
-                    "lbo_roaming_allowed", BCON_BOOL(true),
-#else
-                    "lbo_roaming_allowed", BCON_BOOL(false),
-#endif
+                    "lbo_roaming_allowed", BCON_BOOL(test_ue->lbo_roaming_allowed),
                   "}",
                   "{",
                     "name", BCON_UTF8("ims"),
@@ -1953,11 +1967,7 @@ bson_t *test_db_new_session(test_ue_t *test_ue)
                                  "description", BCON_UTF8("permit out udp from 10.200.136.98/32 1-65535 to assigned 50021"), "}",
                         "]",
                     "}", "]",
-#if 0
-                    "lbo_roaming_allowed", BCON_BOOL(true),
-#else
-                    "lbo_roaming_allowed", BCON_BOOL(false),
-#endif
+                    "lbo_roaming_allowed", BCON_BOOL(test_ue->lbo_roaming_allowed),
                   "}",
                 "]",
             "}", "]",
@@ -2025,11 +2035,7 @@ bson_t *test_db_new_ims(test_ue_t *test_ue)
                             "pre_emption_capability", BCON_INT32(1),
                         "}",
                     "}",
-#if 0
-                    "lbo_roaming_allowed", BCON_BOOL(true),
-#else
-                    "lbo_roaming_allowed", BCON_BOOL(false),
-#endif
+                    "lbo_roaming_allowed", BCON_BOOL(test_ue->lbo_roaming_allowed),
                   "}",
                   "{",
                     "name", BCON_UTF8("ims"),
@@ -2114,11 +2120,7 @@ bson_t *test_db_new_ims(test_ue_t *test_ue)
                         "}",
                       "}",
                     "]",
-#if 0
-                    "lbo_roaming_allowed", BCON_BOOL(true),
-#else
-                    "lbo_roaming_allowed", BCON_BOOL(false),
-#endif
+                    "lbo_roaming_allowed", BCON_BOOL(test_ue->lbo_roaming_allowed),
                   "}",
                 "]",
             "}", "]",
@@ -2187,11 +2189,7 @@ bson_t *test_db_new_slice_with_same_dnn(test_ue_t *test_ue)
                             "pre_emption_capability", BCON_INT32(1),
                         "}",
                     "}",
-#if 1
-                    "lbo_roaming_allowed", BCON_BOOL(true),
-#else
-                    "lbo_roaming_allowed", BCON_BOOL(false),
-#endif
+                    "lbo_roaming_allowed", BCON_BOOL(test_ue->lbo_roaming_allowed),
                   "}",
                   "{",
                     "name", BCON_UTF8("ims"),
@@ -2276,11 +2274,7 @@ bson_t *test_db_new_slice_with_same_dnn(test_ue_t *test_ue)
                         "}",
                       "}",
                     "]",
-#if 1
-                    "lbo_roaming_allowed", BCON_BOOL(true),
-#else
-                    "lbo_roaming_allowed", BCON_BOOL(false),
-#endif
+                    "lbo_roaming_allowed", BCON_BOOL(test_ue->lbo_roaming_allowed),
                   "}",
                 "]",
               "}",
@@ -2309,11 +2303,7 @@ bson_t *test_db_new_slice_with_same_dnn(test_ue_t *test_ue)
                             "pre_emption_capability", BCON_INT32(1),
                         "}",
                     "}",
-#if 1
-                    "lbo_roaming_allowed", BCON_BOOL(true),
-#else
-                    "lbo_roaming_allowed", BCON_BOOL(false),
-#endif
+                    "lbo_roaming_allowed", BCON_BOOL(test_ue->lbo_roaming_allowed),
                   "}",
                   "{",
                     "name", BCON_UTF8("ims"),
@@ -2398,11 +2388,7 @@ bson_t *test_db_new_slice_with_same_dnn(test_ue_t *test_ue)
                         "}",
                       "}",
                     "]",
-#if 1
-                    "lbo_roaming_allowed", BCON_BOOL(true),
-#else
-                    "lbo_roaming_allowed", BCON_BOOL(false),
-#endif
+                    "lbo_roaming_allowed", BCON_BOOL(test_ue->lbo_roaming_allowed),
                   "}",
                 "]",
               "}",
@@ -2432,11 +2418,7 @@ bson_t *test_db_new_slice_with_same_dnn(test_ue_t *test_ue)
                             "pre_emption_capability", BCON_INT32(1),
                         "}",
                     "}",
-#if 1
-                    "lbo_roaming_allowed", BCON_BOOL(true),
-#else
-                    "lbo_roaming_allowed", BCON_BOOL(false),
-#endif
+                    "lbo_roaming_allowed", BCON_BOOL(test_ue->lbo_roaming_allowed),
                   "}",
                   "{",
                     "name", BCON_UTF8("ims"),
@@ -2521,11 +2503,7 @@ bson_t *test_db_new_slice_with_same_dnn(test_ue_t *test_ue)
                         "}",
                       "}",
                     "]",
-#if 1
-                    "lbo_roaming_allowed", BCON_BOOL(true),
-#else
-                    "lbo_roaming_allowed", BCON_BOOL(false),
-#endif
+                    "lbo_roaming_allowed", BCON_BOOL(test_ue->lbo_roaming_allowed),
                   "}",
                 "]",
               "}",
@@ -2595,11 +2573,7 @@ bson_t *test_db_new_slice_with_different_dnn(test_ue_t *test_ue)
                             "pre_emption_capability", BCON_INT32(1),
                         "}",
                     "}",
-#if 1
-                    "lbo_roaming_allowed", BCON_BOOL(true),
-#else
-                    "lbo_roaming_allowed", BCON_BOOL(false),
-#endif
+                    "lbo_roaming_allowed", BCON_BOOL(test_ue->lbo_roaming_allowed),
                   "}",
                   "{",
                     "name", BCON_UTF8("ims"),
@@ -2684,11 +2658,7 @@ bson_t *test_db_new_slice_with_different_dnn(test_ue_t *test_ue)
                         "}",
                       "}",
                     "]",
-#if 1
-                    "lbo_roaming_allowed", BCON_BOOL(true),
-#else
-                    "lbo_roaming_allowed", BCON_BOOL(false),
-#endif
+                    "lbo_roaming_allowed", BCON_BOOL(test_ue->lbo_roaming_allowed),
                   "}",
                 "]",
               "}",
@@ -2717,11 +2687,7 @@ bson_t *test_db_new_slice_with_different_dnn(test_ue_t *test_ue)
                             "pre_emption_capability", BCON_INT32(1),
                         "}",
                     "}",
-#if 1
-                    "lbo_roaming_allowed", BCON_BOOL(true),
-#else
-                    "lbo_roaming_allowed", BCON_BOOL(false),
-#endif
+                    "lbo_roaming_allowed", BCON_BOOL(test_ue->lbo_roaming_allowed),
                   "}",
                   "{",
                     "name", BCON_UTF8("ims2"),
@@ -2806,11 +2772,7 @@ bson_t *test_db_new_slice_with_different_dnn(test_ue_t *test_ue)
                         "}",
                       "}",
                     "]",
-#if 1
-                    "lbo_roaming_allowed", BCON_BOOL(true),
-#else
-                    "lbo_roaming_allowed", BCON_BOOL(false),
-#endif
+                    "lbo_roaming_allowed", BCON_BOOL(test_ue->lbo_roaming_allowed),
                   "}",
                 "]",
               "}",
@@ -2840,11 +2802,7 @@ bson_t *test_db_new_slice_with_different_dnn(test_ue_t *test_ue)
                             "pre_emption_capability", BCON_INT32(1),
                         "}",
                     "}",
-#if 1
-                    "lbo_roaming_allowed", BCON_BOOL(true),
-#else
-                    "lbo_roaming_allowed", BCON_BOOL(false),
-#endif
+                    "lbo_roaming_allowed", BCON_BOOL(test_ue->lbo_roaming_allowed),
                   "}",
                   "{",
                     "name", BCON_UTF8("ims3"),
@@ -2929,11 +2887,7 @@ bson_t *test_db_new_slice_with_different_dnn(test_ue_t *test_ue)
                         "}",
                       "}",
                     "]",
-#if 1
-                    "lbo_roaming_allowed", BCON_BOOL(true),
-#else
-                    "lbo_roaming_allowed", BCON_BOOL(false),
-#endif
+                    "lbo_roaming_allowed", BCON_BOOL(test_ue->lbo_roaming_allowed),
                   "}",
                 "]",
               "}",
@@ -3006,11 +2960,7 @@ bson_t *test_db_new_non3gpp(test_ue_t *test_ue)
                         "addr", BCON_UTF8("127.0.0.4"),
                         "addr6", BCON_UTF8("::1"),
                     "}",
-#if 1
-                    "lbo_roaming_allowed", BCON_BOOL(true),
-#else
-                    "lbo_roaming_allowed", BCON_BOOL(false),
-#endif
+                    "lbo_roaming_allowed", BCON_BOOL(test_ue->lbo_roaming_allowed),
                   "}",
                   "{",
                     "name", BCON_UTF8("wlan"),
@@ -3095,11 +3045,7 @@ bson_t *test_db_new_non3gpp(test_ue_t *test_ue)
                         "}",
                       "}",
                     "]",
-#if 1
-                    "lbo_roaming_allowed", BCON_BOOL(true),
-#else
-                    "lbo_roaming_allowed", BCON_BOOL(false),
-#endif
+                    "lbo_roaming_allowed", BCON_BOOL(test_ue->lbo_roaming_allowed),
                   "}",
                 "]",
             "}", "]",

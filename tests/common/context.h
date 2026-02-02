@@ -95,6 +95,9 @@ typedef struct test_context_s {
     ogs_5gs_tai_t nr_tai;
     ogs_nr_cgi_t nr_cgi;
 
+    /* Default roaming mode from config: true = LBO, false = Home Routed */
+    bool default_lbo_roaming_allowed;
+
     ogs_list_t      test_ue_list;
 } test_context_t;
 
@@ -320,6 +323,9 @@ typedef struct test_ue_s {
     const char *k_string;
     uint8_t opc[OGS_KEY_LEN];
     const char *opc_string;
+
+    /* Roaming mode: true = Local Breakout (LBO), false = Home Routed */
+    bool lbo_roaming_allowed;
 
     uint8_t rand[OGS_RAND_LEN];
     uint8_t autn[OGS_AUTN_LEN];

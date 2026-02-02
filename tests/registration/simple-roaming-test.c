@@ -102,6 +102,14 @@ static void test1_func(abts_case *tc, void *data)
     test_ue->k_string = "465b5ce8b199b49faa5f0a2ee238a6bc";
     test_ue->opc_string = "e8ed289deba952e4283b54e88e6183ca";
 
+    /* 
+     * Set roaming mode from config (default: Home Routed).
+     * Can be changed to test Local Breakout by setting:
+     *   test.subscriber.lbo_roaming_allowed: true
+     * in the config file.
+     */
+    test_ue->lbo_roaming_allowed = test_self()->default_lbo_roaming_allowed;
+
     /********** Insert Subscriber in Database */
     doc = test_db_new_simple(test_ue);
     ABTS_PTR_NOTNULL(tc, doc);
