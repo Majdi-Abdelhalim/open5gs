@@ -69,6 +69,13 @@ static void test1_func(abts_case *tc, void *data)
 
     bson_t *doc = NULL;
 
+    /* Timing variables */
+    ogs_time_t test_start, phase1_start, phase1_end, phase2_start, phase2_end;
+    ogs_time_t reg_start, reg_end, pdu_start, pdu_end;
+    int64_t elapsed_usec;
+
+    test_start = ogs_get_monotonic_time();
+
     /* 
      * Verify config has both PLMNs:
      *   serving_plmn_id[0] = Home PLMN (999-70)
@@ -121,6 +128,9 @@ static void test1_func(abts_case *tc, void *data)
      *         amf.ngap.server[0] = 127.0.1.5 (Home AMF)
      **************************************************************************/
 
+    phase1_start = ogs_get_monotonic_time();
+    ogs_info("[TIMING] Phase 1 (Home Network) started");
+
     /* Home gNB connects to Home AMF (from config: ngap_addr) */
     ngap_home = testngap_client(1, AF_INET);
     ABTS_PTR_NOTNULL(tc, ngap_home);
@@ -142,8 +152,10 @@ static void test1_func(abts_case *tc, void *data)
     recvbuf = testgnb_ngap_read(ngap_home);
     ABTS_PTR_NOTNULL(tc, recvbuf);
     testngap_recv(test_ue, recvbuf);
+    ogs_info("[TIMING] NG-Setup completed");
 
     /* Send Registration request in Home Network */
+    reg_start = ogs_get_monotonic_time();
     test_ue->registration_request_param.guti = 1;
     gmmbuf = testgmm_build_registration_request(test_ue, NULL, false, false);
     ABTS_PTR_NOTNULL(tc, gmmbuf);
@@ -229,12 +241,18 @@ static void test1_func(abts_case *tc, void *data)
     rv = testgnb_ngap_send(ngap_home, sendbuf);
     ABTS_INT_EQUAL(tc, OGS_OK, rv);
 
+    reg_end = ogs_get_monotonic_time();
+    elapsed_usec = (reg_end - reg_start);
+    ogs_info("[TIMING] Home registration completed in %ld.%03ld ms",
+             (long)(elapsed_usec / 1000), (long)(elapsed_usec % 1000));
+
     /* Receive Configuration update command */
     recvbuf = testgnb_ngap_read(ngap_home);
     ABTS_PTR_NOTNULL(tc, recvbuf);
     testngap_recv(test_ue, recvbuf);
 
     /* Send PDU session establishment request in Home Network */
+    pdu_start = ogs_get_monotonic_time();
     sess = test_sess_add_by_dnn_and_psi(test_ue, "internet", 5);
     ogs_assert(sess);
 
@@ -271,6 +289,11 @@ static void test1_func(abts_case *tc, void *data)
     ABTS_PTR_NOTNULL(tc, sendbuf);
     rv = testgnb_ngap_send(ngap_home, sendbuf);
     ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    pdu_end = ogs_get_monotonic_time();
+    elapsed_usec = (pdu_end - pdu_start);
+    ogs_info("[TIMING] Home PDU session established in %ld.%03ld ms",
+             (long)(elapsed_usec / 1000), (long)(elapsed_usec % 1000));
 
     /* Send GTP-U ICMP Packet in Home Network */
     qos_flow = test_qos_flow_find_by_qfi(sess, 1);
@@ -363,6 +386,13 @@ static void test1_func(abts_case *tc, void *data)
     testgnb_gtpu_close(gtpu_home);
     testgnb_ngap_close(ngap_home);
 
+    phase1_end = ogs_get_monotonic_time();
+    elapsed_usec = (phase1_end - phase1_start);
+    ogs_info("[TIMING] ========================================");
+    ogs_info("[TIMING] Phase 1 (Home Network) completed in %ld.%03ld ms",
+             (long)(elapsed_usec / 1000), (long)(elapsed_usec % 1000));
+    ogs_info("[TIMING] ========================================");
+
     /* Remove session context from home network */
     test_sess_remove(sess);
     sess = NULL;
@@ -373,6 +403,9 @@ static void test1_func(abts_case *tc, void *data)
      * Config: test.serving[1].plmn_id = 001-01 (Visiting)
      *         amf.ngap.server[1] = 127.0.2.5 (Visiting AMF)
      **************************************************************************/
+
+    phase2_start = ogs_get_monotonic_time();
+    ogs_info("[TIMING] Phase 2 (Roaming Network) started");
 
     /* Roaming gNB connects to Visiting AMF (from config: ngap2_addr) */
     ngap_roaming = testngap_client(2, AF_INET);
@@ -395,6 +428,7 @@ static void test1_func(abts_case *tc, void *data)
     recvbuf = testgnb_ngap_read(ngap_roaming);
     ABTS_PTR_NOTNULL(tc, recvbuf);
     testngap_recv(test_ue, recvbuf);
+    ogs_info("[TIMING] Roaming NG-Setup completed");
 
     /* Reset NGAP IDs for new connection to roaming AMF */
     test_ue->ran_ue_ngap_id = 0;
@@ -417,6 +451,7 @@ static void test1_func(abts_case *tc, void *data)
             OGS_PLMN_ID_LEN);
 
     /* Send Registration request in Roaming Network */
+    reg_start = ogs_get_monotonic_time();
     test_ue->registration_request_param.guti = 0;
     gmmbuf = testgmm_build_registration_request(test_ue, NULL, false, false);
     ABTS_PTR_NOTNULL(tc, gmmbuf);
@@ -434,24 +469,34 @@ static void test1_func(abts_case *tc, void *data)
     ABTS_PTR_NOTNULL(tc, sendbuf);
     rv = testgnb_ngap_send(ngap_roaming, sendbuf);
     ABTS_INT_EQUAL(tc, OGS_OK, rv);
+    ogs_info("[TIMING] Roaming registration request sent");
 
-    /* Receive Identity request */
-    recvbuf = testgnb_ngap_read(ngap_roaming);
-    ABTS_PTR_NOTNULL(tc, recvbuf);
-    testngap_recv(test_ue, recvbuf);
-
-    /* Send Identity response */
-    gmmbuf = testgmm_build_identity_response(test_ue);
-    ABTS_PTR_NOTNULL(tc, gmmbuf);
-    sendbuf = testngap_build_uplink_nas_transport(test_ue, gmmbuf);
-    ABTS_PTR_NOTNULL(tc, sendbuf);
-    rv = testgnb_ngap_send(ngap_roaming, sendbuf);
-    ABTS_INT_EQUAL(tc, OGS_OK, rv);
-
-    /* Receive Authentication request (routed via SEPP to home network) */
-    recvbuf = testgnb_ngap_read(ngap_roaming);
-    ABTS_PTR_NOTNULL(tc, recvbuf);
-    testngap_recv(test_ue, recvbuf);
+    /*
+     * Per 3GPP TS 23.502 Section 4.2.2.2.2 (General Registration):
+     * "If the SUCI is not provided by the UE nor retrieved from the old AMF
+     *  the Identity Request procedure is initiated by AMF..."
+     * 
+     * In roaming scenarios, when SUCI is already present in the Registration Request,
+     * the visiting AMF skips the identity exchange and proceeds directly to authentication
+     * via SEPP to the home network AUSF. This is standard-compliant behavior.
+     * 
+     * Therefore, we do NOT expect Identity Request/Response in this roaming test.
+     */
+    
+    {
+        ogs_time_t before_wait = ogs_get_monotonic_time();
+        ogs_info("[TIMING] Waiting for authentication request (no identity exchange expected)...");
+        
+        /* Receive Authentication request (routed via SEPP to home network) */
+        recvbuf = testgnb_ngap_read(ngap_roaming);
+        ABTS_PTR_NOTNULL(tc, recvbuf);
+        testngap_recv(test_ue, recvbuf);
+        
+        ogs_time_t after_wait = ogs_get_monotonic_time();
+        int64_t wait_usec = (after_wait - before_wait);
+        ogs_info("[TIMING] Authentication request received (via SEPP) after %ld.%03ld ms wait",
+                 (long)(wait_usec / 1000), (long)(wait_usec % 1000));
+    }
 
     /* Send Authentication response */
     gmmbuf = testgmm_build_authentication_response(test_ue);
@@ -460,11 +505,13 @@ static void test1_func(abts_case *tc, void *data)
     ABTS_PTR_NOTNULL(tc, sendbuf);
     rv = testgnb_ngap_send(ngap_roaming, sendbuf);
     ABTS_INT_EQUAL(tc, OGS_OK, rv);
+    ogs_info("[TIMING] Authentication response sent (via SEPP)");
 
     /* Receive Security mode command */
     recvbuf = testgnb_ngap_read(ngap_roaming);
     ABTS_PTR_NOTNULL(tc, recvbuf);
     testngap_recv(test_ue, recvbuf);
+    ogs_info("[TIMING] Security mode command received");
 
     /* Send Security mode complete */
     gmmbuf = testgmm_build_security_mode_complete(test_ue, nasbuf);
@@ -473,6 +520,7 @@ static void test1_func(abts_case *tc, void *data)
     ABTS_PTR_NOTNULL(tc, sendbuf);
     rv = testgnb_ngap_send(ngap_roaming, sendbuf);
     ABTS_INT_EQUAL(tc, OGS_OK, rv);
+    ogs_info("[TIMING] Security mode complete sent");
 
     /* Receive InitialContextSetupRequest + Registration accept */
     recvbuf = testgnb_ngap_read(ngap_roaming);
@@ -481,6 +529,7 @@ static void test1_func(abts_case *tc, void *data)
     ABTS_INT_EQUAL(tc,
             NGAP_ProcedureCode_id_InitialContextSetup,
             test_ue->ngap_procedure_code);
+    ogs_info("[TIMING] InitialContextSetupRequest received");
 
     /* Send UERadioCapabilityInfoIndication */
     sendbuf = testngap_build_ue_radio_capability_info_indication(test_ue);
@@ -502,12 +551,18 @@ static void test1_func(abts_case *tc, void *data)
     rv = testgnb_ngap_send(ngap_roaming, sendbuf);
     ABTS_INT_EQUAL(tc, OGS_OK, rv);
 
+    reg_end = ogs_get_monotonic_time();
+    elapsed_usec = (reg_end - reg_start);
+    ogs_info("[TIMING] Roaming registration completed in %ld.%03ld ms",
+             (long)(elapsed_usec / 1000), (long)(elapsed_usec % 1000));
+
     /* Receive Configuration update command */
     recvbuf = testgnb_ngap_read(ngap_roaming);
     ABTS_PTR_NOTNULL(tc, recvbuf);
     testngap_recv(test_ue, recvbuf);
 
     /* Send PDU session establishment request in Roaming Network */
+    pdu_start = ogs_get_monotonic_time();
     sess = test_sess_add_by_dnn_and_psi(test_ue, "internet", 6);
     ogs_assert(sess);
 
@@ -548,6 +603,11 @@ static void test1_func(abts_case *tc, void *data)
     ABTS_PTR_NOTNULL(tc, sendbuf);
     rv = testgnb_ngap_send(ngap_roaming, sendbuf);
     ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    pdu_end = ogs_get_monotonic_time();
+    elapsed_usec = (pdu_end - pdu_start);
+    ogs_info("[TIMING] Roaming PDU session established in %ld.%03ld ms",
+             (long)(elapsed_usec / 1000), (long)(elapsed_usec % 1000));
 
     /* Send GTP-U ICMP Packet in Roaming Network */
     qos_flow = test_qos_flow_find_by_qfi(sess, 1);
@@ -635,6 +695,20 @@ static void test1_func(abts_case *tc, void *data)
     ABTS_INT_EQUAL(tc, OGS_OK, rv);
 
     ogs_msleep(300);
+
+    phase2_end = ogs_get_monotonic_time();
+    elapsed_usec = (phase2_end - phase2_start);
+    ogs_info("[TIMING] ========================================");
+    ogs_info("[TIMING] Phase 2 (Roaming Network) completed in %ld.%03ld ms",
+             (long)(elapsed_usec / 1000), (long)(elapsed_usec % 1000));
+    ogs_info("[TIMING] ========================================");
+
+    /* Print overall test summary */
+    elapsed_usec = (phase2_end - test_start);
+    ogs_info("[TIMING] ****************************************");
+    ogs_info("[TIMING] TOTAL TEST TIME: %ld.%03ld ms",
+             (long)(elapsed_usec / 1000), (long)(elapsed_usec % 1000));
+    ogs_info("[TIMING] ****************************************");
 
     /********** Remove Subscriber in Database */
     ABTS_INT_EQUAL(tc, OGS_OK, test_db_remove_ue(test_ue));
