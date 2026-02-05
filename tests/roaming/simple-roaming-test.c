@@ -96,6 +96,29 @@ static void test1_func(abts_case *tc, void *data)
     mobile_identity_suci.protection_scheme_id = OGS_PROTECTION_SCHEME_NULL;
     mobile_identity_suci.home_network_pki_value = 0;
 
+    /*
+     * SUCI Creation and Storage (3GPP TS 33.501 & TS 24.501):
+     * 
+     * In a real UE, SUCI would be generated on-demand by encrypting the SUPI
+     * (IMSI) using the home network's public key. The UE can generate fresh
+     * SUCI for enhanced privacy, but the SUPI remains constant.
+     * 
+     * IMPORTANT: Per 3GPP TS 24.501, the UE stores both SUCI and GUTI:
+     * - SUCI: Derived from SUPI, used when GUTI not available or not recognized
+     * - GUTI: Assigned by network, RETAINED even after deregistration
+     * 
+     * In this test framework:
+     * - We create the SUCI structure once (line 99) and it persists in test_ue
+     * - After home registration, test_ue will also store the assigned GUTI
+     * - When roaming, UE sends GUTI first (3GPP behavior)
+     * - If visiting AMF can't resolve GUTI (no N14), it requests SUCI via Identity procedure
+     * 
+     * protection_scheme_id = NULL means no encryption (test only - production
+     * uses Scheme A/B with actual encryption). This allows us to see the
+     * "SUCI" content (0000203190) in cleartext in logs.
+     * 
+     * Home PLMN is encoded in SUCI: MCC=999, MNC=70 (from mobile_identity_suci)
+     */
     test_ue = test_ue_add_by_suci(&mobile_identity_suci, "0000203190");
     ogs_assert(test_ue);
 
@@ -156,6 +179,21 @@ static void test1_func(abts_case *tc, void *data)
 
     /* Send Registration request in Home Network */
     reg_start = ogs_get_monotonic_time();
+    
+    /*
+     * Mobile Identity in Registration Request (3GPP TS 23.502):
+     * 
+     * Per 3GPP, UE should attempt to use GUTI if available, otherwise SUCI.
+     * Setting guti=1 means: "Use GUTI if test_ue has one, otherwise use SUCI"
+     * 
+     * For this INITIAL home registration, test_ue has NO prior GUTI yet,
+     * so testgmm_build_registration_request() will automatically fall back
+     * to using SUCI from test_ue->mobile_identity (created at line 99).
+     * 
+     * After this registration succeeds, the home AMF will assign a 5G-GUTI
+     * which gets stored in test_ue->nas_5gs_guti. This GUTI will be used
+     * in the roaming registration (Phase 2).
+     */
     test_ue->registration_request_param.guti = 1;
     gmmbuf = testgmm_build_registration_request(test_ue, NULL, false, false);
     ABTS_PTR_NOTNULL(tc, gmmbuf);
@@ -402,6 +440,42 @@ static void test1_func(abts_case *tc, void *data)
      * PHASE 2: ROAMING NETWORK REGISTRATION (PLMN from config index 1)
      * Config: test.serving[1].plmn_id = 001-01 (Visiting)
      *         amf.ngap.server[1] = 127.0.2.5 (Visiting AMF)
+     *
+     * HOME PLMN UE CONTEXT (from Phase 1):
+     * After home registration, the home AMF maintains:
+     * - SUCI, SUPI (subscription identifiers)
+     * - 5G-GUTI (temporary identifier assigned by home AMF)
+     * - Security Context (KAMF, NAS keys, KSI)
+     * - Subscriber profile (UE-AMBR, Allowed NSSAI from UDM)
+     * - PDU Session context (IP address, QoS, DNN)
+     * - Authentication state, UE capabilities
+     *
+     * MOBILITY REGISTRATION OPTIONS (3GPP TS 23.502 Section 4.2.2.2):
+     * 
+     * Current Test: DEREGISTRATION + INITIAL REGISTRATION
+     * - UE explicitly deregisters from home network
+     * - UE performs fresh Initial Registration in visiting network
+     * - Visiting AMF has NO prior knowledge of UE
+     * - Full authentication required via SEPP to home AUSF (~6 seconds)
+     * - New security context established from scratch
+     * - Session continuity lost
+     * - Use case: UE powered off, moved to new location, powered on
+     * 
+     * Alternative: MOBILITY REGISTRATION UPDATE (with UE Context Transfer)
+     * - UE sends Registration Request with old 5G-GUTI to new AMF
+     * - New AMF recognizes GUTI is from different AMF
+     * - New AMF retrieves UE context from old AMF via N14/Namf_Communication
+     * - UE Context transferred includes: SUPI, KAMF, Subscriber data, Sessions
+     * - Authentication can be SKIPPED (security context reused)
+     * - Registration completes in ~200-300ms vs 6 seconds
+     * - PDU sessions can be maintained (seamless handover)
+     * - Use case: UE moving between PLMNs while connected (real roaming)
+     * 
+     * The current test follows the first approach (deregister + re-register)
+     * which is simpler but not optimal for seamless roaming scenarios.
+     * A future enhancement could test mobility registration with context
+     * transfer by sending a Registration Request with the 5G-GUTI assigned
+     * in Phase 1 instead of deregistering.
      **************************************************************************/
 
     phase2_start = ogs_get_monotonic_time();
@@ -452,7 +526,33 @@ static void test1_func(abts_case *tc, void *data)
 
     /* Send Registration request in Roaming Network */
     reg_start = ogs_get_monotonic_time();
-    test_ue->registration_request_param.guti = 0;
+    
+    /*
+     * Mobile Identity in Roaming Registration (3GPP TS 23.502 & TS 23.003):
+     * 
+     * Per 3GPP TS 23.502 Section 4.2.2.2.2:
+     * "The UE includes in the REGISTRATION REQUEST message... the 5G-GUTI
+     *  if the UE has a valid 5G-GUTI."
+     * 
+     * IMPORTANT: Per 3GPP TS 24.501, the UE RETAINS its GUTI even after
+     * deregistration. The GUTI remains stored in the UE's USIM/non-volatile
+     * memory and should be included in subsequent registration attempts.
+     * 
+     * What happens when UE sends home GUTI to visiting network:
+     * 
+     * 1. UE sends Registration Request with 5G-GUTI from home network
+     * 2. Visiting AMF receives GUTI but doesn't recognize it (foreign PLMN)
+     * 3. WITH N14 SUPPORT: Visiting AMF would invoke UE Context Transfer
+     *    to old AMF, retrieve SUPI and context, skip authentication
+     * 4. WITHOUT N14 SUPPORT (Open5GS): Visiting AMF cannot resolve GUTI,
+     *    sends Identity Request to obtain SUCI from UE
+     * 5. UE responds with Identity Response containing SUCI
+     * 6. Now visiting AMF has SUCI and can proceed with authentication
+     * 
+     * This test correctly implements 3GPP-compliant UE behavior (guti=1)
+     * and demonstrates Open5GS behavior without N14 support (Identity exchange).
+     */
+    test_ue->registration_request_param.guti = 1;
     gmmbuf = testgmm_build_registration_request(test_ue, NULL, false, false);
     ABTS_PTR_NOTNULL(tc, gmmbuf);
 
@@ -472,31 +572,46 @@ static void test1_func(abts_case *tc, void *data)
     ogs_info("[TIMING] Roaming registration request sent");
 
     /*
-     * Per 3GPP TS 23.502 Section 4.2.2.2.2 (General Registration):
-     * "If the SUCI is not provided by the UE nor retrieved from the old AMF
-     *  the Identity Request procedure is initiated by AMF..."
+     * Identity Exchange in Roaming (3GPP TS 23.502 Section 4.2.2.2.2):
      * 
-     * In roaming scenarios, when SUCI is already present in the Registration Request,
-     * the visiting AMF skips the identity exchange and proceeds directly to authentication
-     * via SEPP to the home network AUSF. This is standard-compliant behavior.
+     * The UE sent a Registration Request with 5G-GUTI from home network.
+     * The visiting AMF cannot resolve this foreign GUTI because:
      * 
-     * Therefore, we do NOT expect Identity Request/Response in this roaming test.
+     * 1. Open5GS does NOT support N14 interface (Namf_Communication_UEContextTransfer)
+     * 2. Without N14, the visiting AMF cannot query the home AMF for UE context
+     * 3. Per 3GPP: "If the SUCI is not provided by the UE nor retrieved from
+     *    the old AMF, the Identity Request procedure is initiated by AMF"
+     * 
+     * Therefore, the visiting AMF sends Identity Request, and UE responds
+     * with Identity Response containing SUCI. This is Open5GS-specific behavior
+     * due to lack of N14 support.
+     * 
+     * In a full 3GPP implementation WITH N14:
+     * - Visiting AMF would retrieve SUPI from home AMF via UE Context Transfer
+     * - Identity exchange could be skipped
+     * - Authentication might also be skipped (KAMF transferred)
      */
-    
-    {
-        ogs_time_t before_wait = ogs_get_monotonic_time();
-        ogs_info("[TIMING] Waiting for authentication request (no identity exchange expected)...");
-        
-        /* Receive Authentication request (routed via SEPP to home network) */
-        recvbuf = testgnb_ngap_read(ngap_roaming);
-        ABTS_PTR_NOTNULL(tc, recvbuf);
-        testngap_recv(test_ue, recvbuf);
-        
-        ogs_time_t after_wait = ogs_get_monotonic_time();
-        int64_t wait_usec = (after_wait - before_wait);
-        ogs_info("[TIMING] Authentication request received (via SEPP) after %ld.%03ld ms wait",
-                 (long)(wait_usec / 1000), (long)(wait_usec % 1000));
-    }
+
+    /* Receive Identity request */
+    recvbuf = testgnb_ngap_read(ngap_roaming);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    testngap_recv(test_ue, recvbuf);
+    ogs_info("[TIMING] Identity request received");
+
+    /* Send Identity response */
+    gmmbuf = testgmm_build_identity_response(test_ue);
+    ABTS_PTR_NOTNULL(tc, gmmbuf);
+    sendbuf = testngap_build_uplink_nas_transport(test_ue, gmmbuf);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap_roaming, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+    ogs_info("[TIMING] Identity response sent");
+
+    /* Receive Authentication request (routed via SEPP to home network) */
+    recvbuf = testgnb_ngap_read(ngap_roaming);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    testngap_recv(test_ue, recvbuf);
+    ogs_info("[TIMING] Authentication request received (via SEPP)");
 
     /* Send Authentication response */
     gmmbuf = testgmm_build_authentication_response(test_ue);
