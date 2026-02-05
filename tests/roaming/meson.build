@@ -17,7 +17,8 @@
 
 test5gc_roaming_sources = files('''
     abts-main.c
-    simple-roaming-test.c
+    dereg-roaming-test.c
+    mobility-roaming-test.c
 '''.split())
 
 test5gc_roaming_exe = executable('roaming',

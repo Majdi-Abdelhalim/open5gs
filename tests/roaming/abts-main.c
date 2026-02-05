@@ -19,12 +19,14 @@
 
 #include "test-app.h"
 
-abts_suite *test_simple_roaming(abts_suite *suite);
+abts_suite *test_dereg_roaming(abts_suite *suite);
+abts_suite *test_mobility_roaming(abts_suite *suite);
 
 const struct testlist {
     abts_suite *(*func)(abts_suite *suite);
 } alltests[] = {
-    {test_simple_roaming},
+    {test_dereg_roaming},
+    {test_mobility_roaming},
     {NULL},
 };
 
