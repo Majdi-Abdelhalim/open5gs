@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019,2020 by Sukchan Lee <acetcom@gmail.com>
+ * Copyright (C) 2026 <qfyan@uwaterloo.ca>
  *
  * This file is part of Open5GS.
  *

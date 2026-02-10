@@ -926,3 +926,119 @@ void testngap_handle_downlink_ran_status_transfer(
         test_ue->ran_ue_ngap_id = *RAN_UE_NGAP_ID;
     }
 }
+
+/* Helper functions for inter-PLMN N2 handover testing */
+
+bool testngap_is_handover_preparation_failure(ogs_ngap_message_t *message)
+{
+    NGAP_UnsuccessfulOutcome_t *unsuccessfulOutcome = NULL;
+
+    ogs_assert(message);
+
+    if (message->present != NGAP_NGAP_PDU_PR_unsuccessfulOutcome)
+        return false;
+
+    unsuccessfulOutcome = message->choice.unsuccessfulOutcome;
+    if (!unsuccessfulOutcome)
+        return false;
+
+    if (unsuccessfulOutcome->procedureCode != 
+        NGAP_ProcedureCode_id_HandoverPreparation)
+        return false;
+
+    if (unsuccessfulOutcome->value.present != 
+        NGAP_UnsuccessfulOutcome__value_PR_HandoverPreparationFailure)
+        return false;
+
+    return true;
+}
+
+void testngap_extract_handover_failure_cause(
+        ogs_ngap_message_t *message,
+        test_handover_failure_t *failure)
+{
+    int i;
+    NGAP_UnsuccessfulOutcome_t *unsuccessfulOutcome = NULL;
+    NGAP_HandoverPreparationFailure_t *HandoverPreparationFailure = NULL;
+    NGAP_HandoverPreparationFailureIEs_t *ie = NULL;
+    NGAP_Cause_t *Cause = NULL;
+
+    ogs_assert(message);
+    ogs_assert(failure);
+
+    memset(failure, 0, sizeof(test_handover_failure_t));
+
+    if (!testngap_is_handover_preparation_failure(message))
+        return;
+
+    unsuccessfulOutcome = message->choice.unsuccessfulOutcome;
+    HandoverPreparationFailure = 
+        &unsuccessfulOutcome->value.choice.HandoverPreparationFailure;
+
+    for (i = 0; i < HandoverPreparationFailure->protocolIEs.list.count; i++) {
+        ie = HandoverPreparationFailure->protocolIEs.list.array[i];
+        if (!ie)
+            continue;
+
+        if (ie->id == NGAP_ProtocolIE_ID_id_Cause) {
+            Cause = &ie->value.choice.Cause;
+            failure->received = true;
+            failure->cause_group = Cause->present;
+
+            switch (Cause->present) {
+            case NGAP_Cause_PR_radioNetwork:
+                failure->cause_value = Cause->choice.radioNetwork;
+                break;
+            case NGAP_Cause_PR_transport:
+                failure->cause_value = Cause->choice.transport;
+                break;
+            case NGAP_Cause_PR_nas:
+                failure->cause_value = Cause->choice.nas;
+                break;
+            case NGAP_Cause_PR_protocol:
+                failure->cause_value = Cause->choice.protocol;
+                break;
+            case NGAP_Cause_PR_misc:
+                failure->cause_value = Cause->choice.misc;
+                break;
+            default:
+                break;
+            }
+            break;
+        }
+    }
+}
+
+bool testngap_is_n14_related_cause(
+        NGAP_Cause_PR cause_group,
+        long cause_value)
+{
+    /* 
+     * Causes that indicate N14 interface unavailability or
+     * inter-AMF handover not supported:
+     * 
+     * - radioNetwork: unknown-target-id (AMF can't resolve target)
+     * - radioNetwork: handover-target-not-allowed (policy restriction)
+     * - radioNetwork: no-radio-resources-available-in-target-cell
+     * - misc: unspecified (general failure, may include N14 unavailable)
+     */
+
+    if (cause_group == NGAP_Cause_PR_radioNetwork) {
+        switch (cause_value) {
+        case NGAP_CauseRadioNetwork_unknown_targetID:
+        case NGAP_CauseRadioNetwork_ho_target_not_allowed:
+        case NGAP_CauseRadioNetwork_no_radio_resources_available_in_target_cell:
+            return true;
+        default:
+            break;
+        }
+    }
+
+    if (cause_group == NGAP_Cause_PR_misc) {
+        if (cause_value == NGAP_CauseMisc_unspecified)
+            return true;
+    }
+
+    return false;
+}
+

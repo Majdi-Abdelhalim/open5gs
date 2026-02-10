@@ -71,6 +71,16 @@ ogs_pkbuf_t *testngap_build_handover_required(
         uint32_t gnb_id, uint8_t bitsize,
         NGAP_Cause_PR group, long cause,
         bool direct);
+
+/* Enhanced builder for inter-PLMN N2 handover testing */
+ogs_pkbuf_t *testngap_build_handover_required_with_target_plmn(
+        test_ue_t *test_ue, NGAP_HandoverType_t handover_type,
+        uint32_t gnb_id, uint8_t bitsize,
+        NGAP_Cause_PR group, long cause,
+        bool direct,
+        ogs_plmn_id_t *target_plmn_id,
+        ogs_5gs_tai_t *target_tai);
+
 ogs_pkbuf_t *testngap_build_uplink_ran_status_transfer(test_ue_t *test_ue);
 ogs_pkbuf_t *testngap_build_handover_request_ack(test_ue_t *test_ue);
 ogs_pkbuf_t *testngap_build_handover_notify(test_ue_t *test_ue);

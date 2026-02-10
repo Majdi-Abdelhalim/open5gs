@@ -47,6 +47,23 @@ void testngap_handle_handover_command(
         test_ue_t *test_ue, ogs_ngap_message_t *message);
 void testngap_handle_handover_preparation_failure(
         test_ue_t *test_ue, ogs_ngap_message_t *message);
+
+/* Helper structure for verifying handover failure details */
+typedef struct test_handover_failure_s {
+    bool received;
+    NGAP_Cause_PR cause_group;
+    long cause_value;
+} test_handover_failure_t;
+
+/* Helper functions for inter-PLMN N2 handover testing */
+bool testngap_is_handover_preparation_failure(ogs_ngap_message_t *message);
+void testngap_extract_handover_failure_cause(
+        ogs_ngap_message_t *message,
+        test_handover_failure_t *failure);
+bool testngap_is_n14_related_cause(
+        NGAP_Cause_PR cause_group,
+        long cause_value);
+
 void testngap_handle_handover_cancel_ack(
         test_ue_t *test_ue, ogs_ngap_message_t *message);
 void testngap_handle_downlink_ran_status_transfer(
