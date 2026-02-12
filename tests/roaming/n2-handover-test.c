@@ -23,9 +23,9 @@
  * INTER-PLMN N2 HANDOVER TEST CASES
  * 
  * Architecture Under Test:
- * - Home AMF: 127.0.1.5 (PLMN 999-70)
- * - Visiting AMF: 127.0.2.5 (PLMN 001-01)
- * - Two separate AMF instances in different networks
+ * - Home AMF: 127.0.1.5 (PLMN 999-70) - Instance 1
+ * - Visiting AMF: 127.0.2.5 (PLMN 001-01) - Instance 2
+ * - Two separate AMF instances running with different configs
  * 
  * N14 INTERFACE (3GPP TS 23.502 §4.9.1.3):
  * Required for inter-AMF handovers:
@@ -113,18 +113,6 @@ static test_ue_t *create_test_ue(const char *imsi)
     test_ue->opc_string = "e8ed289deba952e4283b54e88e6183ca";
 
     return test_ue;
-}
-
-/*
- * Helper: Setup gNB connections (NGAP + GTPU)
- */
-static void setup_gnb_connections(abts_case *tc,
-        ogs_socknode_t **ngap, ogs_socknode_t **gtpu)
-{
-    *ngap = testngap_client(1, AF_INET);
-    ABTS_PTR_NOTNULL(tc, *ngap);
-    *gtpu = test_gtpu_server(1, AF_INET);
-    ABTS_PTR_NOTNULL(tc, *gtpu);
 }
 
 /*
@@ -316,20 +304,27 @@ static void cleanup_test_ue(abts_case *tc, test_ue_t *test_ue,
 /*
  * TEST 1: Inter-PLMN Handover with Direct Forwarding
  *  
- * Setup: UE + session in Home PLMN (999-70, AMF 127.0.1.5)
- * Action: Handover to Visiting PLMN (001-01, AMF 127.0.2.5) with direct forwarding
+ * Setup: 
+ *   - UE + session in Home PLMN (999-70, gNB 0x4000)
+ *   - Visiting network gNB 0x4001 (PLMN 001-01) also configured
  * 
- * Current (NO N14): ErrorIndication - cannot find target gNB
- * Expected (WITH N14): HandoverCommand via N14 UE context transfer
+ * Action: Handover from Home to Visiting PLMN with direct forwarding
  * 
- * 3GPP: TS 23.502 §4.9.1.3.2
+ * Expected Behavior:
+ *   - Home AMF receives HandoverRequired with target in PLMN 001-01
+ *   - Home AMF detects inter-PLMN scenario (target not in served_guami)
+ *   - Home AMF sends ErrorIndication
+ * 
+ * With N14: Home AMF would use Namf_Communication to reach Visiting AMF
+ * 
+ * 3GPP: TS 23.502 §4.9.1.3.2 (Inter-AMF N2 handover)
  */
  
 static void test1_func(abts_case *tc, void *data)
 {
     int rv;
-    ogs_socknode_t *ngap_home;
-    ogs_socknode_t *gtpu_home;
+    ogs_socknode_t *ngap_home, *ngap_visiting;
+    ogs_socknode_t *gtpu_home, *gtpu_visiting;
     ogs_pkbuf_t *sendbuf;
     ogs_pkbuf_t *recvbuf;
     ogs_ngap_message_t message;
@@ -344,25 +339,69 @@ static void test1_func(abts_case *tc, void *data)
     ogs_assert(ogs_local_conf()->num_of_serving_plmn_id >= 2);
 
     /**************************************************************************
-     * PHASE 1: REGISTER AND ESTABLISH SESSION IN HOME NETWORK
+     * PHASE 0: SETUP BOTH HOME AND VISITING NETWORK INFRASTRUCTURE
      **************************************************************************/
 
-    ogs_info("[TEST1] Phase 1: Home network registration and PDU session");
+    ogs_info("[TEST1] ========================================");
+    ogs_info("[TEST1] Phase 0: Infrastructure setup");
+    ogs_info("[TEST1] ========================================");
 
-    /* Setup UE and insert in database */
+    /* Setup gNB connections for BOTH networks */
+    ogs_info("[TEST1] Setting up Home network gNB 0x4000");
+    ngap_home = testngap_client(1, AF_INET);  /* Connect to Home AMF (127.0.1.5) */
+    ABTS_PTR_NOTNULL(tc, ngap_home);
+    gtpu_home = test_gtpu_server(1, AF_INET);
+    ABTS_PTR_NOTNULL(tc, gtpu_home);
+
+    ogs_info("[TEST1] Setting up Visiting network gNB 0x4001");
+    ngap_visiting = testngap_client(2, AF_INET);  /* Connect to Visiting AMF (127.0.2.5) */
+    ABTS_PTR_NOTNULL(tc, ngap_visiting);
+    gtpu_visiting = test_gtpu_server(2, AF_INET);
+    ABTS_PTR_NOTNULL(tc, gtpu_visiting);
+
+    /* Create test UE */
     test_ue = create_test_ue("0000203191");
     doc = test_db_new_simple(test_ue);
     ABTS_PTR_NOTNULL(tc, doc);
     ABTS_INT_EQUAL(tc, OGS_OK, test_db_insert_ue(test_ue, doc));
 
-    /* Setup gNB connections */
-    setup_gnb_connections(tc, &ngap_home, &gtpu_home);
+    /* Switch to home PLMN context (999-70) and setup home gNB */
+    switch_plmn_context(0);
+    ogs_info("[TEST1] Performing NG-Setup for Home gNB (PLMN 999-70)");
+    perform_ng_setup(tc, test_ue, ngap_home, 0x4000, 22);
+    ogs_info("[TEST1] ✓ Home gNB 0x4000 connected to Home AMF");
 
-    /* Switch to home PLMN context (999-70) */
+    /* Switch to visiting PLMN context (001-01) and attempt setup for visiting gNB */
+    switch_plmn_context(1);
+    ogs_info("[TEST1] Attempting NG-Setup for Visiting gNB (PLMN 001-01)");
+    sendbuf = testngap_build_ng_setup_request(0x4001, 22);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap_visiting, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    recvbuf = testgnb_ngap_read(ngap_visiting);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    
+    /* Check if NG-Setup was accepted or rejected */
+    rv = ogs_ngap_decode(&message, recvbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+    
+    // Assert that visiting gNB 0x4001 is accepted by visiting AMF
+    ABTS_INT_EQUAL(tc, message.present, NGAP_NGAP_PDU_PR_successfulOutcome);
+    
+    ogs_ngap_free(&message);
+    ogs_pkbuf_free(recvbuf);
+
+    /* Switch back to home PLMN for UE registration */
     switch_plmn_context(0);
 
-    /* NG-Setup with Home AMF */
-    perform_ng_setup(tc, test_ue, ngap_home, 0x4000, 22);
+    /**************************************************************************
+     * PHASE 1: REGISTER AND ESTABLISH SESSION IN HOME NETWORK
+     **************************************************************************/
+
+    ogs_info("[TEST1] ========================================");
+    ogs_info("[TEST1] Phase 1: Home network registration");
+    ogs_info("[TEST1] ========================================");
 
     /* Full registration flow */
     perform_full_registration(tc, test_ue, ngap_home);
@@ -388,18 +427,6 @@ static void test1_func(abts_case *tc, void *data)
      * 
      * Source: gNB1 (PLMN 999-70) → Home AMF (127.0.1.5)
      * Target: gNB2 (PLMN 001-01) → Visiting AMF (127.0.2.5)
-     * 
-     * HANDOVER FLOW (if N14 existed):
-     * 1. gNB1 → HandoverRequired → Home AMF
-     * 2. Home AMF → (N14) HandoverRequest → Visiting AMF
-     * 3. Visiting AMF → HandoverRequest → gNB2
-     * 4. gNB2 → HandoverRequestAck → Visiting AMF
-     * 5. Visiting AMF → (N14) HandoverRequestAck → Home AMF
-     * 6. Home AMF → HandoverCommand → gNB1
-     * 
-     * WITHOUT N14 (Current Open5GS):
-     * Step 2 FAILS - Home AMF cannot reach Visiting AMF
-     * Home AMF sends HandoverPreparationFailure
      **************************************************************************/
 
     ogs_info("[TEST1] ========================================");
@@ -538,8 +565,16 @@ test1_success:
 
     /********** Cleanup */
     cleanup_test_ue(tc, test_ue, ngap_home, gtpu_home);
+    
+    /* Close visiting network infrastructure */
+    testgnb_gtpu_close(gtpu_visiting);
+    testgnb_ngap_close(ngap_visiting);
 
-    ogs_info("[TEST1] Test complete - demonstrated N14 gap for inter-PLMN N2 HO");
+    ogs_info("[TEST1] ========================================");
+    ogs_info("[TEST1] Test complete - demonstrated N14 gap");
+    ogs_info("[TEST1] ========================================");
+    ogs_info("[TEST1] Key finding: Both networks operational,");
+    ogs_info("[TEST1] but N14 interface required for inter-AMF handover");
 }
 
 /*
@@ -557,8 +592,8 @@ test1_success:
 static void test2_func(abts_case *tc, void *data)
 {
     int rv;
-    ogs_socknode_t *ngap_home;
-    ogs_socknode_t *gtpu_home;
+    ogs_socknode_t *ngap_home, *ngap_visiting;
+    ogs_socknode_t *gtpu_home, *gtpu_visiting;
     ogs_pkbuf_t *sendbuf;
     ogs_pkbuf_t *recvbuf;
     ogs_ngap_message_t message;
@@ -571,7 +606,22 @@ static void test2_func(abts_case *tc, void *data)
 
     ogs_assert(ogs_local_conf()->num_of_serving_plmn_id >= 2);
 
-    ogs_info("[TEST2] Testing AMF-level rejection of inter-PLMN handover");
+    ogs_info("[TEST2] ========================================");
+    ogs_info("[TEST2] Testing indirect forwarding inter-PLMN");
+    ogs_info("[TEST2] ========================================");
+
+    /* Setup both network infrastructures */
+    ogs_info("[TEST2] Setting up Home network gNB 0x4000");
+    ngap_home = testngap_client(1, AF_INET);  /* Home AMF (127.0.1.5) */
+    ABTS_PTR_NOTNULL(tc, ngap_home);
+    gtpu_home = test_gtpu_server(1, AF_INET);
+    ABTS_PTR_NOTNULL(tc, gtpu_home);
+
+    ogs_info("[TEST2] Setting up Visiting network gNB 0x4002");
+    ngap_visiting = testngap_client(2, AF_INET);  /* Visiting AMF (127.0.2.5) */
+    ABTS_PTR_NOTNULL(tc, ngap_visiting);
+    gtpu_visiting = test_gtpu_server(2, AF_INET);
+    ABTS_PTR_NOTNULL(tc, gtpu_visiting);
 
     /* Setup UE and insert in database */
     test_ue = create_test_ue("0000203192");
@@ -579,14 +629,27 @@ static void test2_func(abts_case *tc, void *data)
     ABTS_PTR_NOTNULL(tc, doc);
     ABTS_INT_EQUAL(tc, OGS_OK, test_db_insert_ue(test_ue, doc));
 
-    /* Setup gNB connections */
-    setup_gnb_connections(tc, &ngap_home, &gtpu_home);
-
     /* Switch to home PLMN context (999-70) */
     switch_plmn_context(0);
 
     /* NG-Setup with Home AMF */
+    ogs_info("[TEST2] NG-Setup for Home gNB 0x4000");
     perform_ng_setup(tc, test_ue, ngap_home, 0x4000, 22);
+
+    /* Setup visiting gNB with different TAC */
+    switch_plmn_context(1);
+    ogs_info("[TEST2] NG-Setup for Visiting gNB 0x4002 (TAC 23)");
+    sendbuf = testngap_build_ng_setup_request(0x4002, 23);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap_visiting, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    recvbuf = testgnb_ngap_read(ngap_visiting);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    testngap_recv(test_ue, recvbuf);
+
+    /* Switch back to home PLMN */
+    switch_plmn_context(0);
 
     /* Full registration flow */
     perform_full_registration(tc, test_ue, ngap_home);
@@ -691,8 +754,12 @@ test2_success:
 
     /* Cleanup */
     cleanup_test_ue(tc, test_ue, ngap_home, gtpu_home);
+    testgnb_gtpu_close(gtpu_visiting);
+    testgnb_ngap_close(ngap_visiting);
 
+    ogs_info("[TEST2] ========================================");
     ogs_info("[TEST2] Test complete");
+    ogs_info("[TEST2] ========================================");
 }
 
 /*
@@ -713,8 +780,8 @@ test2_success:
 static void test3_func(abts_case *tc, void *data)
 {
     int rv;
-    ogs_socknode_t *ngap_home;
-    ogs_socknode_t *gtpu_home;
+    ogs_socknode_t *ngap_home, *ngap_visiting;
+    ogs_socknode_t *gtpu_home, *gtpu_visiting;
     ogs_pkbuf_t *gmmbuf;
     ogs_pkbuf_t *gsmbuf;
     ogs_pkbuf_t *sendbuf;
@@ -727,7 +794,22 @@ static void test3_func(abts_case *tc, void *data)
 
     ogs_assert(ogs_local_conf()->num_of_serving_plmn_id >= 2);
 
-    ogs_info("[TEST3] Testing inter-PLMN handover with multiple PDU sessions");
+    ogs_info("[TEST3] ========================================");
+    ogs_info("[TEST3] Multiple PDU sessions inter-PLMN");
+    ogs_info("[TEST3] ========================================");
+
+    /* Setup both network infrastructures */
+    ogs_info("[TEST3] Setting up Home network gNB 0x4000");
+    ngap_home = testngap_client(1, AF_INET);  /* Home AMF (127.0.1.5) */
+    ABTS_PTR_NOTNULL(tc, ngap_home);
+    gtpu_home = test_gtpu_server(1, AF_INET);
+    ABTS_PTR_NOTNULL(tc, gtpu_home);
+
+    ogs_info("[TEST3] Setting up Visiting network gNB 0x4001");
+    ngap_visiting = testngap_client(2, AF_INET);  /* Visiting AMF (127.0.2.5) */
+    ABTS_PTR_NOTNULL(tc, ngap_visiting);
+    gtpu_visiting = test_gtpu_server(2, AF_INET);
+    ABTS_PTR_NOTNULL(tc, gtpu_visiting);
 
     /* Setup UE and insert in database */
     test_ue = create_test_ue("0000203193");
@@ -735,14 +817,27 @@ static void test3_func(abts_case *tc, void *data)
     ABTS_PTR_NOTNULL(tc, doc);
     ABTS_INT_EQUAL(tc, OGS_OK, test_db_insert_ue(test_ue, doc));
 
-    /* Setup gNB connections */
-    setup_gnb_connections(tc, &ngap_home, &gtpu_home);
-
     /* Switch to home PLMN context (999-70) */
     switch_plmn_context(0);
 
     /* NG-Setup with Home AMF */
+    ogs_info("[TEST3] NG-Setup for Home gNB 0x4000");
     perform_ng_setup(tc, test_ue, ngap_home, 0x4000, 22);
+
+    /* Setup visiting gNB */
+    switch_plmn_context(1);
+    ogs_info("[TEST3] NG-Setup for Visiting gNB 0x4001");
+    sendbuf = testngap_build_ng_setup_request(0x4001, 22);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap_visiting, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    recvbuf = testgnb_ngap_read(ngap_visiting);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    testngap_recv(test_ue, recvbuf);
+
+    /* Switch back to home PLMN */
+    switch_plmn_context(0);
 
     /* Full registration flow */
     perform_full_registration(tc, test_ue, ngap_home);
@@ -854,8 +949,12 @@ static void test3_func(abts_case *tc, void *data)
 
     /* Cleanup */
     cleanup_test_ue(tc, test_ue, ngap_home, gtpu_home);
+    testgnb_gtpu_close(gtpu_visiting);
+    testgnb_ngap_close(ngap_visiting);
 
+    ogs_info("[TEST3] ========================================");
     ogs_info("[TEST3] Test complete");
+    ogs_info("[TEST3] ========================================");
 }
 
 abts_suite *test_n2_handover(abts_suite *suite)
