@@ -4306,18 +4306,6 @@ void ngap_handle_uplink_ran_status_transfer(
         return;
     }
 
-    target_ue = ran_ue_find_by_id(source_ue->target_ue_id);
-    if (!target_ue) {
-        ogs_error("Cannot find Source-UE Context [%lld]",
-                (long long)amf_ue_ngap_id);
-        r = ngap_send_error_indication(
-                gnb, &source_ue->ran_ue_ngap_id, &source_ue->amf_ue_ngap_id,
-                NGAP_Cause_PR_radioNetwork,
-                NGAP_CauseRadioNetwork_inconsistent_remote_UE_NGAP_ID);
-        ogs_expect(r == OGS_OK);
-        ogs_assert(r != OGS_ERROR);
-        return;
-    }
     amf_ue = amf_ue_find_by_id(source_ue->amf_ue_id);
     if (!amf_ue) {
         ogs_error("Cannot find AMF-UE Context [%lld]",
@@ -4326,6 +4314,30 @@ void ngap_handle_uplink_ran_status_transfer(
                 gnb, &source_ue->ran_ue_ngap_id, &source_ue->amf_ue_ngap_id,
                 NGAP_Cause_PR_radioNetwork,
                 NGAP_CauseRadioNetwork_unknown_local_UE_NGAP_ID);
+        ogs_expect(r == OGS_OK);
+        ogs_assert(r != OGS_ERROR);
+        return;
+    }
+
+    /*
+     * Inter-AMF handover (LBO): no local target_ue exists on the source AMF.
+     * RANStatusTransfer is not forwarded because there are no data radio
+     * bearers being transferred (PDU sessions are released and re-established).
+     */
+    if (amf_ue->inter_amf_handover) {
+        ogs_info("[%s] Inter-AMF handover: "
+                "skip RANStatusTransfer forwarding", amf_ue->supi);
+        return;
+    }
+
+    target_ue = ran_ue_find_by_id(source_ue->target_ue_id);
+    if (!target_ue) {
+        ogs_error("Cannot find Source-UE Context [%lld]",
+                (long long)amf_ue_ngap_id);
+        r = ngap_send_error_indication(
+                gnb, &source_ue->ran_ue_ngap_id, &source_ue->amf_ue_ngap_id,
+                NGAP_Cause_PR_radioNetwork,
+                NGAP_CauseRadioNetwork_inconsistent_remote_UE_NGAP_ID);
         ogs_expect(r == OGS_OK);
         ogs_assert(r != OGS_ERROR);
         return;
