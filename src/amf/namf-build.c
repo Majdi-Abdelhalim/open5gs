@@ -398,5 +398,9 @@ ogs_sbi_request_t *amf_namf_comm_build_n2_info_notify(amf_ue_t *amf_ue)
     ogs_sbi_header_set(request->http.headers,
             OGS_SBI_CONTENT_TYPE, OGS_SBI_CONTENT_JSON_TYPE);
 
+    /* User-Agent is needed for SCP routing (requester-nf-type) */
+    ogs_sbi_header_set(request->http.headers,
+            OGS_SBI_USER_AGENT, (char *)"AMF");
+
     return request;
 }

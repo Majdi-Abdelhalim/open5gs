@@ -2721,6 +2721,12 @@ static int parse_json(ogs_sbi_message_t *message,
                     }
                     break;
 
+                CASE(OGS_SBI_RESOURCE_NAME_N2_INFO_NOTIFY)
+                    /* N2InfoNotify body parsed manually by the handler
+                     * since N2InformationNotification is not in
+                     * ogs_sbi_message_t */
+                    break;
+
                 DEFAULT
                     rv = OGS_ERROR;
                     ogs_error("Unknown resource name [%s]",

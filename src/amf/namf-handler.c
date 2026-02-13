@@ -2325,6 +2325,8 @@ int amf_namf_comm_handle_n2_info_notify(
     OpenAPI_n2_information_notification_t *N2InformationNotification = NULL;
     cJSON *item = NULL;
 
+    amf_nsmf_pdusession_sm_context_param_t param;
+
     ogs_sbi_response_t *response = NULL;
 
     ogs_assert(stream);
@@ -2391,8 +2393,11 @@ int amf_namf_comm_handle_n2_info_notify(
     }
 
     /* Release all PDU sessions at the source SMF(s) */
+    memset(&param, 0, sizeof(param));
+    param.ue_location = true;
+    param.ue_timezone = true;
     amf_sbi_send_release_all_sessions(
-            ran_ue, amf_ue, AMF_RELEASE_SM_CONTEXT_NO_STATE, NULL);
+            ran_ue, amf_ue, AMF_RELEASE_SM_CONTEXT_NO_STATE, &param);
 
     /* Clear inter-AMF handover state */
     amf_ue->inter_amf_handover = false;

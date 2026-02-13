@@ -26,24 +26,19 @@
  * - Home AMF: 127.0.1.5 (PLMN 999-70) - Instance 1
  * - Visiting AMF: 127.0.2.5 (PLMN 001-01) - Instance 2
  * - Two separate AMF instances running with different configs
+ * - N14 (Namf_Communication) between AMFs routed through SEPP
  * 
  * N14 INTERFACE (3GPP TS 23.502 §4.9.1.3):
- * Required for inter-AMF handovers:
- * 1. Namf_Communication_UEContextTransfer - UE context to target AMF
- * 2. Namf_Communication_N2InfoNotify - N2 message forwarding
- * 3. AMF discovery via NRF
- * 4. Security context and session continuity
- * 
- * CURRENT STATE (Open5GS):
- * ✗ N14 interface NOT implemented
- * ✗ Home AMF cannot discover/reach Visiting AMF
- * ✗ Home AMF cannot find target gNB (connected to different AMF)
- * ✗ Result: ErrorIndication sent to source gNB
+ * Implemented for inter-AMF handovers:
+ * 1. Namf_Communication_CreateUEContext - UE context to target AMF
+ * 2. Namf_Communication_N2InfoNotify - Handover completion notification
+ * 3. AMF discovery via NRF with SEPP routing
+ * 4. LBO: PDU sessions released and re-established after handover
  * 
  * TEST COVERAGE:
- * 1. Direct forwarding failure
- * 2. Indirect forwarding failure
- * 3. Multiple sessions with partial handover (indirect forwarding)
+ * 1. Direct forwarding inter-PLMN handover
+ * 2. Indirect forwarding inter-PLMN handover
+ * 3. Multiple sessions with LBO handover
  * 4. Handover cancellation (TODO)
  */
 
@@ -269,54 +264,112 @@ static test_sess_t *establish_pdu_session(abts_case *tc, test_ue_t *test_ue,
 }
 
 /*
- * Helper: Cleanup test resources
+ * Helper: Build HandoverRequestAck without PDU sessions.
+ * Used for inter-AMF LBO handover where no sessions are transferred.
+ * Same as testngap_build_handover_request_ack() but skips sess_list iteration.
  */
-static void cleanup_test_ue(abts_case *tc, test_ue_t *test_ue,
-        ogs_socknode_t *ngap, ogs_socknode_t *gtpu)
+static ogs_pkbuf_t *build_handover_request_ack_no_sessions(test_ue_t *test_ue)
 {
-    int rv;
-    ogs_pkbuf_t *sendbuf, *recvbuf;
+    NGAP_NGAP_PDU_t pdu;
+    NGAP_SuccessfulOutcome_t *successfulOutcome = NULL;
+    NGAP_HandoverRequestAcknowledge_t *HandoverRequestAcknowledge = NULL;
 
-    sendbuf = testngap_build_ue_context_release_request(test_ue,
-            NGAP_Cause_PR_radioNetwork, NGAP_CauseRadioNetwork_user_inactivity,
-            true);
-    ABTS_PTR_NOTNULL(tc, sendbuf);
-    rv = testgnb_ngap_send(ngap, sendbuf);
-    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+    NGAP_HandoverRequestAcknowledgeIEs_t *ie = NULL;
+    NGAP_AMF_UE_NGAP_ID_t *AMF_UE_NGAP_ID = NULL;
+    NGAP_RAN_UE_NGAP_ID_t *RAN_UE_NGAP_ID = NULL;
+    NGAP_TargetToSource_TransparentContainer_t
+        *TargetToSource_TransparentContainer = NULL;
 
-    recvbuf = testgnb_ngap_read(ngap);
-    ABTS_PTR_NOTNULL(tc, recvbuf);
-    testngap_recv(test_ue, recvbuf);
+    uint8_t tmp[OGS_HUGE_LEN];
+    char *_container = "00010000";
 
-    sendbuf = testngap_build_ue_context_release_complete(test_ue);
-    ABTS_PTR_NOTNULL(tc, sendbuf);
-    rv = testgnb_ngap_send(ngap, sendbuf);
-    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+    ogs_assert(test_ue);
 
-    ogs_msleep(300);
+    memset(&pdu, 0, sizeof(NGAP_NGAP_PDU_t));
+    pdu.present = NGAP_NGAP_PDU_PR_successfulOutcome;
+    pdu.choice.successfulOutcome = CALLOC(1, sizeof(NGAP_SuccessfulOutcome_t));
 
-    ABTS_INT_EQUAL(tc, OGS_OK, test_db_remove_ue(test_ue));
-    testgnb_gtpu_close(gtpu);
-    testgnb_ngap_close(ngap);
-    test_ue_remove(test_ue);
+    successfulOutcome = pdu.choice.successfulOutcome;
+    successfulOutcome->procedureCode =
+        NGAP_ProcedureCode_id_HandoverResourceAllocation;
+    successfulOutcome->criticality = NGAP_Criticality_reject;
+    successfulOutcome->value.present =
+        NGAP_SuccessfulOutcome__value_PR_HandoverRequestAcknowledge;
+
+    HandoverRequestAcknowledge =
+        &successfulOutcome->value.choice.HandoverRequestAcknowledge;
+
+    ie = CALLOC(1, sizeof(NGAP_HandoverRequestAcknowledgeIEs_t));
+    ogs_assert(ie);
+    ASN_SEQUENCE_ADD(&HandoverRequestAcknowledge->protocolIEs, ie);
+
+    ie->id = NGAP_ProtocolIE_ID_id_AMF_UE_NGAP_ID;
+    ie->criticality = NGAP_Criticality_ignore;
+    ie->value.present =
+        NGAP_HandoverRequestAcknowledgeIEs__value_PR_AMF_UE_NGAP_ID;
+
+    AMF_UE_NGAP_ID = &ie->value.choice.AMF_UE_NGAP_ID;
+
+    ie = CALLOC(1, sizeof(NGAP_HandoverRequestAcknowledgeIEs_t));
+    ogs_assert(ie);
+    ASN_SEQUENCE_ADD(&HandoverRequestAcknowledge->protocolIEs, ie);
+
+    ie->id = NGAP_ProtocolIE_ID_id_RAN_UE_NGAP_ID;
+    ie->criticality = NGAP_Criticality_ignore;
+    ie->value.present =
+        NGAP_HandoverRequestAcknowledgeIEs__value_PR_RAN_UE_NGAP_ID;
+
+    RAN_UE_NGAP_ID = &ie->value.choice.RAN_UE_NGAP_ID;
+
+    asn_uint642INTEGER(AMF_UE_NGAP_ID, test_ue->amf_ue_ngap_id);
+
+    test_ue->ran_ue_ngap_id++;
+    *RAN_UE_NGAP_ID = test_ue->ran_ue_ngap_id;
+
+    /* No PDUSessionResourceAdmittedList for LBO (no sessions transferred) */
+
+    ie = CALLOC(1, sizeof(NGAP_HandoverRequestAcknowledgeIEs_t));
+    ogs_assert(ie);
+    ASN_SEQUENCE_ADD(&HandoverRequestAcknowledge->protocolIEs, ie);
+
+    ie->id = NGAP_ProtocolIE_ID_id_TargetToSource_TransparentContainer;
+    ie->criticality = NGAP_Criticality_reject;
+    ie->value.present = NGAP_HandoverRequestAcknowledgeIEs__value_PR_TargetToSource_TransparentContainer;
+
+    TargetToSource_TransparentContainer =
+        &ie->value.choice.TargetToSource_TransparentContainer;
+
+    ogs_hex_from_string(_container, tmp, sizeof(tmp));
+
+    TargetToSource_TransparentContainer->size = 4;
+    TargetToSource_TransparentContainer->buf =
+        CALLOC(TargetToSource_TransparentContainer->size, sizeof(uint8_t));
+    memcpy(TargetToSource_TransparentContainer->buf,
+            tmp, TargetToSource_TransparentContainer->size);
+
+    return ogs_ngap_encode(&pdu);
 }
 
 /*
  * TEST 1: Inter-PLMN Handover with Direct Forwarding
- *  
- * Setup: 
+ *
+ * Setup:
  *   - UE + session in Home PLMN (999-70, gNB 0x4000)
  *   - Visiting network gNB 0x4001 (PLMN 001-01) also configured
- * 
+ *
  * Action: Handover from Home to Visiting PLMN with direct forwarding
- * 
- * Expected Behavior:
- *   - Home AMF receives HandoverRequired with target in PLMN 001-01
- *   - Home AMF detects inter-PLMN scenario (target not in served_guami)
- *   - Home AMF sends ErrorIndication
- * 
- * With N14: Home AMF would use Namf_Communication to reach Visiting AMF
- * 
+ *
+ * Expected Behavior (N14/Namf_Communication implemented):
+ *   - Home AMF detects inter-PLMN target, discovers Visiting AMF via NRF/SEPP
+ *   - Home AMF sends CreateUEContext to Visiting AMF
+ *   - Visiting AMF sends HandoverRequest to target gNB (no PDU sessions for LBO)
+ *   - Target gNB responds HandoverRequestAck
+ *   - Visiting AMF responds CreateUEContext to Home AMF
+ *   - Home AMF sends HandoverCommand to source gNB
+ *   - Target gNB sends HandoverNotify to Visiting AMF
+ *   - Visiting AMF sends N2InfoNotify(HANDOVER_COMPLETED) to Home AMF
+ *   - Home AMF sends UEContextReleaseCommand to source gNB, releases sessions
+ *
  * 3GPP: TS 23.502 §4.9.1.3.2 (Inter-AMF N2 handover)
  */
  
@@ -423,170 +476,162 @@ static void test1_func(abts_case *tc, void *data)
     ogs_info("[TEST1] Phase 1 complete - UE registered with active PDU session");
 
     /**************************************************************************
-     * PHASE 2: ATTEMPT INTER-PLMN N2 HANDOVER (EXPECTED TO FAIL)
-     * 
-     * Source: gNB1 (PLMN 999-70) → Home AMF (127.0.1.5)
-     * Target: gNB2 (PLMN 001-01) → Visiting AMF (127.0.2.5)
+     * PHASE 2: INTER-PLMN N2 HANDOVER VIA N14 (Namf_Communication)
+     *
+     * Source: gNB 0x4000 (PLMN 999-70) → Home AMF (127.0.1.5)
+     * Target: gNB 0x4001 (PLMN 001-01) → Visiting AMF (127.0.2.5)
+     *
+     * Flow:
+     *   1. Source gNB → HandoverRequired → Home AMF
+     *   2. Home AMF → CreateUEContext (SBI/SEPP) → Visiting AMF
+     *   3. Visiting AMF → HandoverRequest → Target gNB (no PDU sessions)
+     *   4. Target gNB → HandoverRequestAck → Visiting AMF
+     *   5. Visiting AMF → CreateUEContext response → Home AMF
+     *   6. Home AMF → HandoverCommand → Source gNB
+     *   7. Target gNB → HandoverNotify → Visiting AMF
+     *   8. Visiting AMF → N2InfoNotify(HANDOVER_COMPLETED) → Home AMF
+     *   9. Home AMF → UEContextReleaseCommand → Source gNB
      **************************************************************************/
 
     ogs_info("[TEST1] ========================================");
-    ogs_info("[TEST1] Phase 2: Attempting inter-PLMN N2 handover");
+    ogs_info("[TEST1] Phase 2: Inter-PLMN N2 handover via N14");
     ogs_info("[TEST1] ========================================");
 
     /* Prepare target with different PLMN (visiting network) */
     ogs_plmn_id_t target_plmn;
     ogs_5gs_tai_t target_tai;
-    test_handover_failure_t handover_failure;
+    uint64_t visiting_amf_ue_ngap_id;
+    uint32_t visiting_ran_ue_ngap_id;
 
     memset(&target_plmn, 0, sizeof(target_plmn));
     memset(&target_tai, 0, sizeof(target_tai));
 
-    /* Use visiting PLMN from configuration (001-01) */
     ogs_assert(ogs_local_conf()->num_of_serving_plmn_id >= 2);
     memcpy(&target_plmn, &ogs_local_conf()->serving_plmn_id[1], OGS_PLMN_ID_LEN);
     memcpy(&target_tai.plmn_id, &target_plmn, OGS_PLMN_ID_LEN);
-    target_tai.tac.v = 22;  /* Same TAC, different PLMN */
+    target_tai.tac.v = 22;
 
-    ogs_info("[TEST1] Source PLMN: MCC=%03d MNC=%02d (Home)",
-             ogs_plmn_id_mnc_len(&test_self()->plmn_support[0].plmn_id) == 2 ? 
-             ogs_plmn_id_mcc(&test_self()->plmn_support[0].plmn_id) : 
-             ogs_plmn_id_mcc(&test_self()->plmn_support[0].plmn_id),
-             ogs_plmn_id_mnc(&test_self()->plmn_support[0].plmn_id));
-    ogs_info("[TEST1] Target PLMN: MCC=%03d MNC=%02d (Visiting)",
-             ogs_plmn_id_mnc_len(&target_plmn) == 2 ? 
-             ogs_plmn_id_mcc(&target_plmn) : 
-             ogs_plmn_id_mcc(&target_plmn),
-             ogs_plmn_id_mnc(&target_plmn));
-    ogs_info("[TEST1] Target gNB ID: 0x%x, TAC: %d", 0x4001, target_tai.tac.v);
-
-    /* Build HandoverRequired with cross-PLMN target */
-    ogs_info("[TEST1] → Building HandoverRequired with cross-PLMN target");
+    /* Step 1: Send HandoverRequired to Home AMF */
+    ogs_info("[TEST1] → Sending HandoverRequired to Home AMF");
     sendbuf = testngap_build_handover_required_with_target_plmn(
-            test_ue, 
+            test_ue,
             NGAP_HandoverType_intra5gs,
-            0x4001,  /* target gNB ID */
-            24,      /* bitsize */
+            0x4001, 24,
             NGAP_Cause_PR_radioNetwork,
             NGAP_CauseRadioNetwork_handover_desirable_for_radio_reason,
-            true,    /* direct forwarding */
-            &target_plmn,
-            &target_tai);
+            true, &target_plmn, &target_tai);
     ABTS_PTR_NOTNULL(tc, sendbuf);
-
-    ogs_info("[TEST1] → Sending HandoverRequired to Home AMF");
     rv = testgnb_ngap_send(ngap_home, sendbuf);
     ABTS_INT_EQUAL(tc, OGS_OK, rv);
 
-    /* Receive response from AMF */
-    ogs_info("[TEST1] ← Waiting for AMF response...");
+    /* Step 3: Receive HandoverRequest on target gNB (from Visiting AMF) */
+    ogs_info("[TEST1] ← Waiting for HandoverRequest on visiting gNB...");
+    recvbuf = testgnb_ngap_read(ngap_visiting);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    testngap_recv(test_ue, recvbuf);
+    ABTS_INT_EQUAL(tc, NGAP_ProcedureCode_id_HandoverResourceAllocation,
+            test_ue->ngap_procedure_code);
+    ogs_info("[TEST1] ← Received HandoverRequest on visiting gNB");
+
+    /* Save visiting AMF context */
+    visiting_amf_ue_ngap_id = test_ue->amf_ue_ngap_id;
+
+    /* Step 4: Send HandoverRequestAck (no PDU sessions for LBO) */
+    ogs_info("[TEST1] → Sending HandoverRequestAck (no sessions)");
+    sendbuf = build_handover_request_ack_no_sessions(test_ue);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap_visiting, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    /* Save visiting ran_ue_ngap_id after ack builder incremented it */
+    visiting_ran_ue_ngap_id = test_ue->ran_ue_ngap_id;
+
+    /* Step 6: Receive HandoverCommand on source gNB */
+    ogs_info("[TEST1] ← Waiting for HandoverCommand on home gNB...");
     recvbuf = testgnb_ngap_read(ngap_home);
     ABTS_PTR_NOTNULL(tc, recvbuf);
+    testngap_recv(test_ue, recvbuf);
+    ABTS_INT_EQUAL(tc, NGAP_ProcedureCode_id_HandoverPreparation,
+            test_ue->ngap_procedure_code);
+    ogs_info("[TEST1] ← Received HandoverCommand on home gNB");
 
-    /* Decode and verify it's HandoverPreparationFailure */
-    rv = ogs_ngap_decode(&message, recvbuf);
+    /* Restore visiting AMF context for target-side messages */
+    test_ue->amf_ue_ngap_id = visiting_amf_ue_ngap_id;
+    test_ue->ran_ue_ngap_id = visiting_ran_ue_ngap_id;
+    test_ue->nr_cgi.cell_id = 0x40011;
+
+    /* Step 7: Send HandoverNotify on target gNB */
+    ogs_info("[TEST1] → Sending HandoverNotify on visiting gNB");
+    sendbuf = testngap_build_handover_notify(test_ue);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap_visiting, sendbuf);
     ABTS_INT_EQUAL(tc, OGS_OK, rv);
 
-    ogs_info("[TEST1] ← Received NGAP message type: %d", message.present);
-    
-    /* Check for ErrorIndication - AMF cannot find target gNB */
-    if (message.present == NGAP_NGAP_PDU_PR_initiatingMessage) {
-        NGAP_InitiatingMessage_t *initiatingMessage = message.choice.initiatingMessage;
-        
-        if (initiatingMessage && 
-            initiatingMessage->procedureCode == NGAP_ProcedureCode_id_ErrorIndication) {
-            ogs_info("[TEST1] ← Received ErrorIndication from Home AMF");
-            /* This is the expected outcome! */
-            goto test1_success;
-        }
-    }
-    
-    /* Log what message we actually received */
-    if (message.present == NGAP_NGAP_PDU_PR_successfulOutcome) {
-        NGAP_SuccessfulOutcome_t *successfulOutcome = message.choice.successfulOutcome;
-        ogs_info("[TEST1] ← Received SuccessfulOutcome, procedure: %ld", 
-                 successfulOutcome->procedureCode);
-        
-        if (successfulOutcome->procedureCode == NGAP_ProcedureCode_id_HandoverPreparation) {
-            ogs_warn("[TEST1] ! AMF sent HandoverCommand (unexpected)");
-            ogs_warn("[TEST1] ! This would mean AMF found the target gNB");
-            ogs_warn("[TEST1] ! Possible reasons:");
-            ogs_warn("[TEST1] ! - Target gNB also connected to Home AMF");
-            ogs_warn("[TEST1] ! - AMF incorrectly accepting invalid target");
-        }
-    }
-
-    if (testngap_is_handover_preparation_failure(&message)) {
-        ogs_info("[TEST1] ← Received HandoverPreparationFailure");
-        
-        testngap_extract_handover_failure_cause(&message, &handover_failure);
-        
-        if (handover_failure.received) {
-            ogs_info("[TEST1] ← Failure Cause Group: %d", 
-                     handover_failure.cause_group);
-            ogs_info("[TEST1] ← Failure Cause Value: %ld", 
-                     handover_failure.cause_value);
-            
-            if (testngap_is_n14_related_cause(
-                    handover_failure.cause_group, 
-                    handover_failure.cause_value)) {
-                ogs_info("[TEST1] ✓ Cause indicates N14 unavailability");
-            } else {
-                ogs_info("[TEST1] ! Cause may not be N14-related");
-            }
-        }
-        
-        ogs_info("[TEST1] ✓ Inter-PLMN N2 handover correctly rejected");
-        ogs_info("[TEST1] ✓ Reason: N14 interface not implemented in Open5GS");
-    } else {
-        ogs_warn("[TEST1] ========================================");
-        ogs_warn("[TEST1] UNEXPECTED MESSAGE TYPE");
-        ogs_warn("[TEST1] ========================================");
-        ogs_warn("[TEST1] Expected: ErrorIndication or HandoverPreparationFailure");
-        ogs_warn("[TEST1] Received: message type %d", message.present);
-        ogs_warn("[TEST1] ");
-        ogs_warn("[TEST1] This indicates unexpected AMF behavior.");
-        ogs_warn("[TEST1] ========================================");
-    }
-
-test1_success:
-    ogs_ngap_free(&message);
-    ogs_pkbuf_free(recvbuf);
-
-    /* Verify UE still has working data path in home network */
-    rv = test_gtpu_send_ping(gtpu_home, qos_flow, TEST_PING_IPV4);
-    ABTS_INT_EQUAL(tc, OGS_OK, rv);
-
-    recvbuf = testgnb_gtpu_read(gtpu_home);
+    /* Step 9: Receive UEContextReleaseCommand on source gNB */
+    ogs_info("[TEST1] ← Waiting for UEContextReleaseCommand on home gNB...");
+    recvbuf = testgnb_ngap_read(ngap_home);
     ABTS_PTR_NOTNULL(tc, recvbuf);
-    ogs_pkbuf_free(recvbuf);
+    testngap_recv(test_ue, recvbuf);
+    ABTS_INT_EQUAL(tc, NGAP_ProcedureCode_id_UEContextRelease,
+            test_ue->ngap_procedure_code);
+    ogs_info("[TEST1] ← Received UEContextReleaseCommand on home gNB");
 
-    ogs_info("[TEST1] UE remains active in home network");
-    ogs_info("[TEST1] Inter-PLMN N2 handover requires N14 implementation");
+    /* Send UEContextReleaseComplete on source gNB */
+    sendbuf = testngap_build_ue_context_release_complete(test_ue);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap_home, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
 
-    /********** Cleanup */
-    cleanup_test_ue(tc, test_ue, ngap_home, gtpu_home);
-    
-    /* Close visiting network infrastructure */
+    ogs_msleep(300);
+
+    ogs_info("[TEST1] ✓ Inter-PLMN N2 handover completed successfully");
+
+    /********** Cleanup visiting AMF UE context */
+    test_ue->amf_ue_ngap_id = visiting_amf_ue_ngap_id;
+    test_ue->ran_ue_ngap_id = visiting_ran_ue_ngap_id;
+
+    sendbuf = testngap_build_ue_context_release_request(test_ue,
+            NGAP_Cause_PR_radioNetwork, NGAP_CauseRadioNetwork_user_inactivity,
+            true);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap_visiting, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    recvbuf = testgnb_ngap_read(ngap_visiting);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    testngap_recv(test_ue, recvbuf);
+
+    sendbuf = testngap_build_ue_context_release_complete(test_ue);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap_visiting, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    ogs_msleep(300);
+
+    /********** Final cleanup */
+    ABTS_INT_EQUAL(tc, OGS_OK, test_db_remove_ue(test_ue));
+    testgnb_gtpu_close(gtpu_home);
+    testgnb_ngap_close(ngap_home);
     testgnb_gtpu_close(gtpu_visiting);
     testgnb_ngap_close(ngap_visiting);
+    test_ue_remove(test_ue);
 
     ogs_info("[TEST1] ========================================");
-    ogs_info("[TEST1] Test complete - demonstrated N14 gap");
+    ogs_info("[TEST1] Test complete - inter-PLMN N2 handover OK");
     ogs_info("[TEST1] ========================================");
-    ogs_info("[TEST1] Key finding: Both networks operational,");
-    ogs_info("[TEST1] but N14 interface required for inter-AMF handover");
 }
 
 /*
  * TEST 2: Inter-PLMN Handover with Indirect Forwarding
- * 
+ *
  * Setup: UE + session in Home PLMN (999-70)
- * Action: Handover with indirect forwarding (data via source UPF)
- * 
- * Current (NO N14): ErrorIndication - N14 needed regardless of forwarding mode
- * Expected (WITH N14): HandoverCommand with indirect data tunnels
- * 
- * Key: Both direct and indirect forwarding require N14 for inter-AMF
+ * Action: Handover with indirect forwarding to PLMN 001-01
+ *
+ * Expected (N14 implemented):
+ *   Full inter-AMF handover via CreateUEContext + N2InfoNotify
+ *   No PDU sessions transferred (LBO release-and-reestablish)
+ *
+ * Key: Both direct and indirect forwarding use N14 for inter-AMF
  * 3GPP: TS 23.502 §4.9.1.3.2
  */
 static void test2_func(abts_case *tc, void *data)
@@ -596,11 +641,8 @@ static void test2_func(abts_case *tc, void *data)
     ogs_socknode_t *gtpu_home, *gtpu_visiting;
     ogs_pkbuf_t *sendbuf;
     ogs_pkbuf_t *recvbuf;
-    ogs_ngap_message_t message;
 
     test_ue_t *test_ue = NULL;
-    test_sess_t *sess = NULL;
-    test_bearer_t *qos_flow = NULL;
 
     bson_t *doc = NULL;
 
@@ -655,107 +697,128 @@ static void test2_func(abts_case *tc, void *data)
     perform_full_registration(tc, test_ue, ngap_home);
 
     /* PDU Session Establishment */
-    sess = establish_pdu_session(tc, test_ue, ngap_home, "internet", 5);
-
-    /* Get QoS flow for data path verification */
-    qos_flow = test_qos_flow_find_by_qfi(sess, 1);
-    ogs_assert(qos_flow);
+    establish_pdu_session(tc, test_ue, ngap_home, "internet", 5);
 
     ogs_info("[TEST2] ========================================");
-    ogs_info("[TEST2] Testing inter-PLMN handover with indirect forwarding");
+    ogs_info("[TEST2] Inter-PLMN handover with indirect forwarding");
     ogs_info("[TEST2] ========================================");
 
     /* Prepare target with different PLMN */
     ogs_plmn_id_t target_plmn;
     ogs_5gs_tai_t target_tai;
-    test_handover_failure_t handover_failure;
+    uint64_t visiting_amf_ue_ngap_id;
+    uint32_t visiting_ran_ue_ngap_id;
 
     memset(&target_plmn, 0, sizeof(target_plmn));
     memset(&target_tai, 0, sizeof(target_tai));
 
-    /* Use visiting PLMN from configuration */
     memcpy(&target_plmn, &ogs_local_conf()->serving_plmn_id[1], OGS_PLMN_ID_LEN);
     memcpy(&target_tai.plmn_id, &target_plmn, OGS_PLMN_ID_LEN);
     target_tai.tac.v = 23;
 
-    ogs_info("[TEST2] Attempting handover with indirect forwarding");
-    ogs_info("[TEST2] → Building HandoverRequired (indirect, cross-PLMN)");
-    
+    /* Send HandoverRequired to Home AMF */
+    ogs_info("[TEST2] → Sending HandoverRequired (indirect, cross-PLMN)");
     sendbuf = testngap_build_handover_required_with_target_plmn(
-            test_ue, 
+            test_ue,
             NGAP_HandoverType_intra5gs,
-            0x4002,  /* different target gNB */
-            24,
+            0x4002, 24,
             NGAP_Cause_PR_radioNetwork,
             NGAP_CauseRadioNetwork_handover_desirable_for_radio_reason,
-            false,   /* indirect forwarding */
-            &target_plmn,
-            &target_tai);
+            false, &target_plmn, &target_tai);
     ABTS_PTR_NOTNULL(tc, sendbuf);
-
-    ogs_info("[TEST2] → Sending HandoverRequired to Home AMF");
     rv = testgnb_ngap_send(ngap_home, sendbuf);
     ABTS_INT_EQUAL(tc, OGS_OK, rv);
 
-    /* Receive and verify failure */
-    ogs_info("[TEST2] ← Waiting for AMF response...");
+    /* Receive HandoverRequest on target gNB (from Visiting AMF) */
+    ogs_info("[TEST2] ← Waiting for HandoverRequest on visiting gNB...");
+    recvbuf = testgnb_ngap_read(ngap_visiting);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    testngap_recv(test_ue, recvbuf);
+    ABTS_INT_EQUAL(tc, NGAP_ProcedureCode_id_HandoverResourceAllocation,
+            test_ue->ngap_procedure_code);
+    ogs_info("[TEST2] ← Received HandoverRequest on visiting gNB");
+
+    /* Save visiting AMF context */
+    visiting_amf_ue_ngap_id = test_ue->amf_ue_ngap_id;
+
+    /* Send HandoverRequestAck (no PDU sessions for LBO) */
+    ogs_info("[TEST2] → Sending HandoverRequestAck (no sessions)");
+    sendbuf = build_handover_request_ack_no_sessions(test_ue);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap_visiting, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    visiting_ran_ue_ngap_id = test_ue->ran_ue_ngap_id;
+
+    /* Receive HandoverCommand on source gNB */
+    ogs_info("[TEST2] ← Waiting for HandoverCommand on home gNB...");
     recvbuf = testgnb_ngap_read(ngap_home);
     ABTS_PTR_NOTNULL(tc, recvbuf);
+    testngap_recv(test_ue, recvbuf);
+    ABTS_INT_EQUAL(tc, NGAP_ProcedureCode_id_HandoverPreparation,
+            test_ue->ngap_procedure_code);
+    ogs_info("[TEST2] ← Received HandoverCommand on home gNB");
 
-    rv = ogs_ngap_decode(&message, recvbuf);
+    /* Restore visiting AMF context for target-side messages */
+    test_ue->amf_ue_ngap_id = visiting_amf_ue_ngap_id;
+    test_ue->ran_ue_ngap_id = visiting_ran_ue_ngap_id;
+    test_ue->nr_cgi.cell_id = 0x40021;
+
+    /* Send HandoverNotify on target gNB */
+    ogs_info("[TEST2] → Sending HandoverNotify on visiting gNB");
+    sendbuf = testngap_build_handover_notify(test_ue);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap_visiting, sendbuf);
     ABTS_INT_EQUAL(tc, OGS_OK, rv);
 
-    ogs_info("[TEST2] ← Received NGAP message type: %d", message.present);
-
-    /* Check for ErrorIndication - AMF cannot find target gNB */
-    if (message.present == NGAP_NGAP_PDU_PR_initiatingMessage) {
-        NGAP_InitiatingMessage_t *initiatingMessage = message.choice.initiatingMessage;
-        
-        if (initiatingMessage && 
-            initiatingMessage->procedureCode == NGAP_ProcedureCode_id_ErrorIndication) {
-            ogs_info("[TEST2] ← Received ErrorIndication from Home AMF");
-            ogs_info("[TEST2] ✓ SUCCESS: N14 required for indirect forwarding too");
-            ogs_info("[TEST2] Both direct and indirect forwarding modes fail without N14");
-            goto test2_success;
-        }
-    }
-
-    if (testngap_is_handover_preparation_failure(&message)) {
-        testngap_extract_handover_failure_cause(&message, &handover_failure);
-        
-        ogs_info("[TEST2] ← Received HandoverPreparationFailure");
-        ogs_info("[TEST2] ← Cause: group=%d, value=%ld",
-                 handover_failure.cause_group, handover_failure.cause_value);
-        ogs_info("[TEST2] ✓ Indirect forwarding also fails without N14");
-    } else {
-        ogs_warn("[TEST2] ========================================");
-        ogs_warn("[TEST2] UNEXPECTED MESSAGE TYPE");
-        ogs_warn("[TEST2] Expected: ErrorIndication");
-        ogs_warn("[TEST2] Received: message type %d", message.present);
-        ogs_warn("[TEST2] ========================================");
-    }
-
-test2_success:
-
-    ogs_ngap_free(&message);
-    ogs_pkbuf_free(recvbuf);
-
-    ogs_info("[TEST2] Result: N14 required for both direct and indirect");
-    
-    /* Verify data path still works */
-    rv = test_gtpu_send_ping(gtpu_home, qos_flow, TEST_PING_IPV4);
-    ABTS_INT_EQUAL(tc, OGS_OK, rv);
-
-    recvbuf = testgnb_gtpu_read(gtpu_home);
+    /* Receive UEContextReleaseCommand on source gNB */
+    ogs_info("[TEST2] ← Waiting for UEContextReleaseCommand on home gNB...");
+    recvbuf = testgnb_ngap_read(ngap_home);
     ABTS_PTR_NOTNULL(tc, recvbuf);
-    ogs_pkbuf_free(recvbuf);
+    testngap_recv(test_ue, recvbuf);
+    ABTS_INT_EQUAL(tc, NGAP_ProcedureCode_id_UEContextRelease,
+            test_ue->ngap_procedure_code);
+    ogs_info("[TEST2] ← Received UEContextReleaseCommand on home gNB");
 
-    ogs_info("[TEST2] ✓ UE remains active in home network");
+    /* Send UEContextReleaseComplete on source gNB */
+    sendbuf = testngap_build_ue_context_release_complete(test_ue);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap_home, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
 
-    /* Cleanup */
-    cleanup_test_ue(tc, test_ue, ngap_home, gtpu_home);
+    ogs_msleep(300);
+
+    ogs_info("[TEST2] ✓ Inter-PLMN N2 handover (indirect) completed");
+
+    /* Cleanup visiting AMF UE context */
+    test_ue->amf_ue_ngap_id = visiting_amf_ue_ngap_id;
+    test_ue->ran_ue_ngap_id = visiting_ran_ue_ngap_id;
+
+    sendbuf = testngap_build_ue_context_release_request(test_ue,
+            NGAP_Cause_PR_radioNetwork, NGAP_CauseRadioNetwork_user_inactivity,
+            true);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap_visiting, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    recvbuf = testgnb_ngap_read(ngap_visiting);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    testngap_recv(test_ue, recvbuf);
+
+    sendbuf = testngap_build_ue_context_release_complete(test_ue);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap_visiting, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    ogs_msleep(300);
+
+    /* Final cleanup */
+    ABTS_INT_EQUAL(tc, OGS_OK, test_db_remove_ue(test_ue));
+    testgnb_gtpu_close(gtpu_home);
+    testgnb_ngap_close(ngap_home);
     testgnb_gtpu_close(gtpu_visiting);
     testgnb_ngap_close(ngap_visiting);
+    test_ue_remove(test_ue);
 
     ogs_info("[TEST2] ========================================");
     ogs_info("[TEST2] Test complete");
@@ -763,18 +826,19 @@ test2_success:
 }
 
 /*
- * TEST CASE 3: Inter-PLMN Partial Handover (Multiple Sessions)
- * 
+ * TEST CASE 3: Inter-PLMN Handover with Multiple PDU Sessions
+ *
  * Scenario:
  * - Establish internet session (succeeds)
  * - Attempt IMS session (may fail if not configured)
  * - Handover active session(s) to PLMN 001-01 (Visiting AMF 127.0.2.5)
- * - Uses indirect forwarding (realistic for inter-PLMN, no Xn link)
- * 
- * Current (NO N14): ErrorIndication - Home AMF cannot find target gNB
- * Expected (WITH N14): HandoverCommand via N14 for partial session transfer
- * 
- * Demonstrates: Even partial session transfer across PLMNs requires N14
+ *
+ * Expected (N14 implemented):
+ *   Full inter-AMF handover via CreateUEContext + N2InfoNotify.
+ *   No PDU sessions transferred (LBO release-and-reestablish).
+ *   Home AMF releases sessions after HANDOVER_COMPLETED notification.
+ *
+ * Demonstrates: LBO handover with multiple sessions active
  * 3GPP: TS 23.502 §4.9.1.3.2
  */
 static void test3_func(abts_case *tc, void *data)
@@ -786,7 +850,6 @@ static void test3_func(abts_case *tc, void *data)
     ogs_pkbuf_t *gsmbuf;
     ogs_pkbuf_t *sendbuf;
     ogs_pkbuf_t *recvbuf;
-    ogs_ngap_message_t message;
 
     test_ue_t *test_ue = NULL;
     test_sess_t *sess = NULL;
@@ -886,9 +949,11 @@ static void test3_func(abts_case *tc, void *data)
         ogs_info("[TEST3] Both internet and IMS sessions established");
     }
 
-    /* Attempt inter-PLMN handover with established session(s) */
+    /* Inter-PLMN handover with established session(s) */
     ogs_plmn_id_t target_plmn;
     ogs_5gs_tai_t target_tai;
+    uint64_t visiting_amf_ue_ngap_id;
+    uint32_t visiting_ran_ue_ngap_id;
 
     memset(&target_plmn, 0, sizeof(target_plmn));
     memset(&target_tai, 0, sizeof(target_tai));
@@ -896,61 +961,109 @@ static void test3_func(abts_case *tc, void *data)
     memcpy(&target_tai.plmn_id, &target_plmn, OGS_PLMN_ID_LEN);
     target_tai.tac.v = 22;
 
-    ogs_info("[TEST3] Attempting inter-PLMN handover to PLMN 001-01");
+    ogs_info("[TEST3] Inter-PLMN handover to PLMN 001-01");
 
+    /* Send HandoverRequired to Home AMF */
     sendbuf = testngap_build_handover_required_with_target_plmn(
-            test_ue, 
+            test_ue,
             NGAP_HandoverType_intra5gs,
-            0x4001,
-            24,
+            0x4001, 24,
             NGAP_Cause_PR_radioNetwork,
             NGAP_CauseRadioNetwork_handover_desirable_for_radio_reason,
-            false,  /* indirect forwarding - no Xn link between PLMNs */
-            &target_plmn,
-            &target_tai);
+            false, &target_plmn, &target_tai);
     ABTS_PTR_NOTNULL(tc, sendbuf);
     rv = testgnb_ngap_send(ngap_home, sendbuf);
     ABTS_INT_EQUAL(tc, OGS_OK, rv);
 
-    recvbuf = testgnb_ngap_read(ngap_home);
+    /* Receive HandoverRequest on target gNB */
+    ogs_info("[TEST3] ← Waiting for HandoverRequest on visiting gNB...");
+    recvbuf = testgnb_ngap_read(ngap_visiting);
     ABTS_PTR_NOTNULL(tc, recvbuf);
+    testngap_recv(test_ue, recvbuf);
+    ABTS_INT_EQUAL(tc, NGAP_ProcedureCode_id_HandoverResourceAllocation,
+            test_ue->ngap_procedure_code);
+    ogs_info("[TEST3] ← Received HandoverRequest on visiting gNB");
 
-    rv = ogs_ngap_decode(&message, recvbuf);
-    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+    /* Save visiting AMF context */
+    visiting_amf_ue_ngap_id = test_ue->amf_ue_ngap_id;
 
-    if (message.present == NGAP_NGAP_PDU_PR_initiatingMessage) {
-        NGAP_InitiatingMessage_t *initiatingMessage = message.choice.initiatingMessage;
-        if (initiatingMessage && 
-            initiatingMessage->procedureCode == NGAP_ProcedureCode_id_ErrorIndication) {
-            ogs_info("[TEST3] ✓ ErrorIndication: Home AMF cannot reach target in other AMF");
-            ogs_info("[TEST3] Partial session handover across PLMNs requires N14");
-        }
-    }
-
-    ogs_ngap_free(&message);
-    ogs_pkbuf_free(recvbuf);
-
-    /* Cleanup */
-    sendbuf = testngap_build_ue_context_release_request(test_ue,
-            NGAP_Cause_PR_radioNetwork, NGAP_CauseRadioNetwork_user_inactivity,
-            true);
+    /* Send HandoverRequestAck (no PDU sessions for LBO) */
+    sendbuf = build_handover_request_ack_no_sessions(test_ue);
     ABTS_PTR_NOTNULL(tc, sendbuf);
-    rv = testgnb_ngap_send(ngap_home, sendbuf);
+    rv = testgnb_ngap_send(ngap_visiting, sendbuf);
     ABTS_INT_EQUAL(tc, OGS_OK, rv);
 
+    visiting_ran_ue_ngap_id = test_ue->ran_ue_ngap_id;
+
+    /* Receive HandoverCommand on source gNB */
+    ogs_info("[TEST3] ← Waiting for HandoverCommand on home gNB...");
     recvbuf = testgnb_ngap_read(ngap_home);
     ABTS_PTR_NOTNULL(tc, recvbuf);
     testngap_recv(test_ue, recvbuf);
+    ABTS_INT_EQUAL(tc, NGAP_ProcedureCode_id_HandoverPreparation,
+            test_ue->ngap_procedure_code);
+    ogs_info("[TEST3] ← Received HandoverCommand on home gNB");
 
+    /* Restore visiting AMF context for target-side messages */
+    test_ue->amf_ue_ngap_id = visiting_amf_ue_ngap_id;
+    test_ue->ran_ue_ngap_id = visiting_ran_ue_ngap_id;
+    test_ue->nr_cgi.cell_id = 0x40011;
+
+    /* Send HandoverNotify on target gNB */
+    ogs_info("[TEST3] → Sending HandoverNotify on visiting gNB");
+    sendbuf = testngap_build_handover_notify(test_ue);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap_visiting, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    /* Receive UEContextReleaseCommand on source gNB */
+    ogs_info("[TEST3] ← Waiting for UEContextReleaseCommand on home gNB...");
+    recvbuf = testgnb_ngap_read(ngap_home);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    testngap_recv(test_ue, recvbuf);
+    ABTS_INT_EQUAL(tc, NGAP_ProcedureCode_id_UEContextRelease,
+            test_ue->ngap_procedure_code);
+    ogs_info("[TEST3] ← Received UEContextReleaseCommand on home gNB");
+
+    /* Send UEContextReleaseComplete on source gNB */
     sendbuf = testngap_build_ue_context_release_complete(test_ue);
     ABTS_PTR_NOTNULL(tc, sendbuf);
     rv = testgnb_ngap_send(ngap_home, sendbuf);
     ABTS_INT_EQUAL(tc, OGS_OK, rv);
 
-    /* Cleanup */
-    cleanup_test_ue(tc, test_ue, ngap_home, gtpu_home);
+    ogs_msleep(300);
+
+    ogs_info("[TEST3] ✓ Inter-PLMN handover with sessions completed");
+
+    /* Cleanup visiting AMF UE context */
+    test_ue->amf_ue_ngap_id = visiting_amf_ue_ngap_id;
+    test_ue->ran_ue_ngap_id = visiting_ran_ue_ngap_id;
+
+    sendbuf = testngap_build_ue_context_release_request(test_ue,
+            NGAP_Cause_PR_radioNetwork, NGAP_CauseRadioNetwork_user_inactivity,
+            true);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap_visiting, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    recvbuf = testgnb_ngap_read(ngap_visiting);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    testngap_recv(test_ue, recvbuf);
+
+    sendbuf = testngap_build_ue_context_release_complete(test_ue);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap_visiting, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    ogs_msleep(300);
+
+    /* Final cleanup */
+    ABTS_INT_EQUAL(tc, OGS_OK, test_db_remove_ue(test_ue));
+    testgnb_gtpu_close(gtpu_home);
+    testgnb_ngap_close(ngap_home);
     testgnb_gtpu_close(gtpu_visiting);
     testgnb_ngap_close(ngap_visiting);
+    test_ue_remove(test_ue);
 
     ogs_info("[TEST3] ========================================");
     ogs_info("[TEST3] Test complete");
@@ -967,7 +1080,7 @@ abts_suite *test_n2_handover(abts_suite *suite)
     ogs_info("Architecture Under Test:");
     ogs_info("  - Home AMF (999-70): 127.0.1.5");
     ogs_info("  - Visiting AMF (001-01): 127.0.2.5");
-    ogs_info("  - Missing: N14 interface between AMFs");
+    ogs_info("  - N14 (Namf_Communication) between AMFs via SEPP");
     ogs_info(" ");
 
     abts_run_test(suite, test1_func, NULL);
@@ -980,22 +1093,18 @@ abts_suite *test_n2_handover(abts_suite *suite)
     ogs_info(" ");
     ogs_info("1. Direct Forwarding Cross-PLMN");
     ogs_info("   Target: gNB 0x4001, TAC 22");
-    ogs_info("   Tests: Basic inter-PLMN handover with direct forwarding");
-    ogs_info("   Status: FAILS (Expected) - N14 not implemented");
+    ogs_info("   Tests: Inter-PLMN N2 handover with direct forwarding");
+    ogs_info("   Status: PASS");
     ogs_info(" ");
     ogs_info("2. Indirect Forwarding Cross-PLMN");
     ogs_info("   Target: gNB 0x4002, TAC 23 (different from source)");
-    ogs_info("   Tests: Inter-PLMN handover with data path verification");
-    ogs_info("   Status: FAILS (Expected) - N14 not implemented");
+    ogs_info("   Tests: Inter-PLMN handover with indirect forwarding");
+    ogs_info("   Status: PASS");
     ogs_info(" ");
     ogs_info("3. Multiple PDU Sessions");
-    ogs_info("   Tests: Partial session transfer across PLMNs");
-    ogs_info("   Status: FAILS (Expected) - N14 not implemented");
+    ogs_info("   Tests: Inter-PLMN handover with active sessions (LBO)");
+    ogs_info("   Status: PASS");
     ogs_info(" ");
-    ogs_info("========================================");
-    ogs_info(" ");
-    ogs_info("NOTE: All inter-PLMN N2 handovers require N14 interface");
-    ogs_info("      (Namf_Communication service between AMFs)");
     ogs_info("========================================");
 
     return suite;

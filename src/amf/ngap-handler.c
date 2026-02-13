@@ -3763,6 +3763,7 @@ void ngap_handle_handover_request_ack(
         memset(&UeContextCreatedData, 0, sizeof(UeContextCreatedData));
         UeContextCreatedData.ue_context = &UeContext;
         UeContextCreatedData.target_to_source_data = &targetToSourceData;
+        UeContextCreatedData.pdu_session_list = OpenAPI_list_create();
 
         memset(&sendmsg, 0, sizeof(sendmsg));
         sendmsg.UeContextCreatedData = &UeContextCreatedData;
@@ -3789,6 +3790,7 @@ void ngap_handle_handover_request_ack(
                 ogs_sbi_server_send_response(stream, response));
 
         ogs_pkbuf_free(container_pkbuf);
+        OpenAPI_list_free(UeContextCreatedData.pdu_session_list);
 
         ogs_info("[HandoverRequestAck] CreateUEContext 201 sent for [%s]",
                 amf_ue->supi);
