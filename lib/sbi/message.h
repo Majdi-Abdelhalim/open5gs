@@ -130,6 +130,7 @@ extern "C" {
 #define OGS_SBI_RESOURCE_NAME_N1_N2_MESSAGES        "n1-n2-messages"
 #define OGS_SBI_RESOURCE_NAME_TRANSFER              "transfer"
 #define OGS_SBI_RESOURCE_NAME_TRANSFER_UPDATE       "transfer-update"
+#define OGS_SBI_RESOURCE_NAME_N2_INFO_NOTIFY        "n2-info-notify"
 
 #define OGS_SBI_RESOURCE_NAME_SM_CONTEXT_STATUS     "sm-context-status"
 #define OGS_SBI_RESOURCE_NAME_AM_POLICY_NOTIFY      "am-policy-notify"

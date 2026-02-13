@@ -57,6 +57,8 @@ bool amf_sbi_send_request(
 #define AMF_UPDATE_SM_CONTEXT_HANDOVER_REQ_ACK          22
 #define AMF_UPDATE_SM_CONTEXT_HANDOVER_NOTIFY           23
 #define AMF_UPDATE_SM_CONTEXT_HANDOVER_CANCEL           24
+#define AMF_NAMF_COMM_CREATE_UE_CONTEXT                  25
+#define AMF_NAMF_COMM_N2_INFO_NOTIFY                     26
 #define AMF_RELEASE_SM_CONTEXT_NO_STATE                 31
 #define AMF_RELEASE_SM_CONTEXT_REGISTRATION_ACCEPT      33
 #define AMF_RELEASE_SM_CONTEXT_SERVICE_ACCEPT           34
