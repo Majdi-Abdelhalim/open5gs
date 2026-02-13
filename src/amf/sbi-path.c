@@ -684,8 +684,9 @@ static int client_notify_cb(
         return OGS_ERROR;
     }
 
-    if (message.res_status != OGS_SBI_HTTP_STATUS_NO_CONTENT)
-        ogs_error("N1-N2-Message Transfer Failure Notification failed [%d]",
+    if (message.res_status != OGS_SBI_HTTP_STATUS_NO_CONTENT &&
+            message.res_status != OGS_SBI_HTTP_STATUS_OK)
+        ogs_error("Notification callback failed [%d]",
                 message.res_status);
 
     ogs_sbi_message_free(&message);
