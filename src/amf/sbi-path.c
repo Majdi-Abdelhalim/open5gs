@@ -126,6 +126,23 @@ int amf_ue_sbi_discover_and_send(
         }
     }
 
+    /*
+     * If the caller already provided target_plmn_list in the discovery
+     * option (e.g., for inter-AMF handover), ensure requester_plmn_list
+     * is also populated for proper SEPP routing.
+     */
+    if (discovery_option &&
+        discovery_option->num_of_target_plmn_list &&
+        !discovery_option->num_of_requester_plmn_list) {
+        int i;
+
+        ogs_assert(ogs_local_conf()->num_of_serving_plmn_id);
+        for (i = 0; i < ogs_local_conf()->num_of_serving_plmn_id; i++) {
+            ogs_sbi_discovery_option_add_requester_plmn_list(
+                    discovery_option, &ogs_local_conf()->serving_plmn_id[i]);
+        }
+    }
+
     xact = ogs_sbi_xact_add(
             amf_ue->id, &amf_ue->sbi, service_type, discovery_option,
             (ogs_sbi_build_f)build, amf_ue, data);

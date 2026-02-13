@@ -3290,6 +3290,110 @@ void ngap_handle_handover_required(
         return;
     }
 
+    /* Check for inter-PLMN handover before attempting local gNB lookup */
+    if (globalGNB_ID->pLMNIdentity.size == OGS_PLMN_ID_LEN) {
+        ogs_plmn_id_t target_plmn_id;
+        bool is_target_plmn_served = false;
+        int i;
+
+        memcpy(&target_plmn_id,
+                globalGNB_ID->pLMNIdentity.buf, OGS_PLMN_ID_LEN);
+
+        /* Check if target PLMN is served by this AMF */
+        for (i = 0; i < amf_self()->num_of_served_guami; i++) {
+            if (memcmp(&amf_self()->served_guami[i].plmn_id,
+                        &target_plmn_id, OGS_PLMN_ID_LEN) == 0) {
+                is_target_plmn_served = true;
+                break;
+            }
+        }
+
+        if (!is_target_plmn_served) {
+            ogs_sbi_discovery_option_t *discovery_option = NULL;
+            ogs_5gs_tai_t target_tai;
+
+            ogs_ngap_GNB_ID_to_uint32(&globalGNB_ID->gNB_ID, &target_gnb_id);
+
+            ogs_info("Inter-PLMN handover to PLMN[0x%06x] gNB-id[0x%x]",
+                    ogs_plmn_id_hexdump(&target_plmn_id), target_gnb_id);
+
+            /* Validate required IEs before proceeding */
+            if (!PDUSessionList) {
+                ogs_error("No PDUSessionList");
+                r = ngap_send_error_indication2(source_ue,
+                        NGAP_Cause_PR_protocol,
+                        NGAP_CauseProtocol_semantic_error);
+                ogs_expect(r == OGS_OK);
+                ogs_assert(r != OGS_ERROR);
+                return;
+            }
+
+            if (!SourceToTarget_TransparentContainer) {
+                ogs_error("No SourceToTarget_TransparentContainer");
+                r = ngap_send_error_indication2(source_ue,
+                        NGAP_Cause_PR_protocol,
+                        NGAP_CauseProtocol_semantic_error);
+                ogs_expect(r == OGS_OK);
+                ogs_assert(r != OGS_ERROR);
+                return;
+            }
+
+            if (!SECURITY_CONTEXT_IS_VALID(amf_ue)) {
+                ogs_error("No Security Context");
+                r = ngap_send_error_indication2(source_ue,
+                        NGAP_Cause_PR_nas,
+                        NGAP_CauseNas_authentication_failure);
+                ogs_expect(r == OGS_OK);
+                ogs_assert(r != OGS_ERROR);
+                return;
+            }
+
+            /* Store HandoverType */
+            amf_ue->handover.type = *HandoverType;
+
+            /* Store Cause */
+            amf_ue->handover.group = Cause->present;
+            amf_ue->handover.cause = (int)Cause->choice.radioNetwork;
+
+            /* Update Security Context (NextHop) */
+            amf_ue->nhcc++;
+            ogs_kdf_nh_gnb(amf_ue->kamf, amf_ue->nh, amf_ue->nh);
+
+            /* Store Container */
+            OGS_ASN_STORE_DATA(&amf_ue->handover.container,
+                    SourceToTarget_TransparentContainer);
+
+            /* Mark as inter-AMF handover */
+            amf_ue->inter_amf_handover = true;
+
+            /* Extract target TAI from TargetID */
+            ogs_ngap_ASN_to_5gs_tai(
+                    &targetRANNodeID->selectedTAI, &target_tai);
+
+            /* Build discovery option for target AMF in target PLMN */
+            discovery_option = ogs_sbi_discovery_option_new();
+            ogs_assert(discovery_option);
+
+            ogs_sbi_discovery_option_add_target_plmn_list(
+                    discovery_option, &target_plmn_id);
+            ogs_sbi_discovery_option_set_tai(
+                    discovery_option, &target_tai);
+
+            /* Send CreateUEContext to target AMF via SEPP */
+            r = amf_ue_sbi_discover_and_send(
+                    OGS_SBI_SERVICE_TYPE_NAMF_COMM,
+                    discovery_option,
+                    amf_namf_comm_build_create_ue_context,
+                    amf_ue,
+                    AMF_NAMF_COMM_CREATE_UE_CONTEXT,
+                    TargetID);
+            ogs_expect(r == OGS_OK);
+            ogs_assert(r != OGS_ERROR);
+
+            return;
+        }
+    }
+
     ogs_ngap_GNB_ID_to_uint32(&globalGNB_ID->gNB_ID, &target_gnb_id);
     target_gnb = amf_gnb_find_by_gnb_id(target_gnb_id);
     if (!target_gnb) {

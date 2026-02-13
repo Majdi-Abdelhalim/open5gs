@@ -26,6 +26,7 @@
 #include "npcf-build.h"
 #include "nnssf-build.h"
 #include "nnrf-build.h"
+#include "namf-build.h"
 
 #ifdef __cplusplus
 extern "C" {

@@ -227,6 +227,10 @@ void ogs_sbi_message_free(ogs_sbi_message_t *message)
         OpenAPI_ue_context_transfer_req_data_free(message->UeContextTransferReqData);
     if (message->UeContextTransferRspData)
         OpenAPI_ue_context_transfer_rsp_data_free(message->UeContextTransferRspData);
+    if (message->UeContextCreateData)
+        OpenAPI_ue_context_create_data_free(message->UeContextCreateData);
+    if (message->UeContextCreatedData)
+        OpenAPI_ue_context_created_data_free(message->UeContextCreatedData);
     if (message->UeRegStatusUpdateReqData)
         OpenAPI_ue_reg_status_update_req_data_free(message->UeRegStatusUpdateReqData);
     if (message->UeRegStatusUpdateRspData)
@@ -1719,6 +1723,14 @@ static char *build_json(ogs_sbi_message_t *message)
     } else if (message->UeRegStatusUpdateRspData) {
         item = OpenAPI_ue_reg_status_update_rsp_data_convertToJSON(
                 message->UeRegStatusUpdateRspData);
+        ogs_assert(item);
+    } else if (message->UeContextCreateData) {
+        item = OpenAPI_ue_context_create_data_convertToJSON(
+                message->UeContextCreateData);
+        ogs_assert(item);
+    } else if (message->UeContextCreatedData) {
+        item = OpenAPI_ue_context_created_data_convertToJSON(
+                message->UeContextCreatedData);
         ogs_assert(item);
     }
 

@@ -1528,6 +1528,27 @@ void gmm_state_registered(ogs_fsm_t *s, amf_event_t *e)
         CASE(OGS_SBI_SERVICE_NAME_NAMF_COMM)
             SWITCH(sbi_message->h.resource.component[0])
             CASE(OGS_SBI_RESOURCE_NAME_UE_CONTEXTS)
+
+                if (state == AMF_NAMF_COMM_CREATE_UE_CONTEXT) {
+                    /*
+                     * CreateUEContext response from target AMF
+                     * (inter-PLMN N2 handover)
+                     *
+                     * TODO: Step 7 - Fully handle CreateUEContext response
+                     * (parse UeContextCreatedData, extract TargetToSource
+                     * container, send HandoverCommand to source gNB)
+                     */
+                    if (sbi_message->res_status ==
+                            OGS_SBI_HTTP_STATUS_CREATED) {
+                        ogs_info("[%s] CreateUEContext response [201]",
+                                amf_ue->supi);
+                    } else {
+                        ogs_error("[%s] CreateUEContext failed [%d]",
+                                amf_ue->supi, sbi_message->res_status);
+                    }
+                    break;
+                }
+
                 SWITCH(sbi_message->h.resource.component[2])
                 CASE(OGS_SBI_RESOURCE_NAME_TRANSFER)
 

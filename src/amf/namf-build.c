@@ -18,6 +18,7 @@
  */
 
 #include "namf-build.h"
+#include "nsmf-build.h"
 
 static char* ogs_guti_to_string(ogs_nas_5gs_guti_t *nas_guti)
 {
@@ -94,6 +95,135 @@ ogs_sbi_request_t *amf_namf_comm_build_ue_context_transfer(
 
     if (ue_context_id)
         ogs_free(ue_context_id);
+
+    return request;
+}
+
+ogs_sbi_request_t *amf_namf_comm_build_create_ue_context(
+        amf_ue_t *amf_ue, void *data)
+{
+    ogs_sbi_message_t message;
+    ogs_sbi_request_t *request = NULL;
+    ogs_sbi_server_t *server = NULL;
+    ogs_sbi_header_t header;
+
+    OpenAPI_ue_context_create_data_t UeContextCreateData;
+    OpenAPI_ue_context_t UeContext;
+    OpenAPI_n2_info_content_t sourceToTargetData;
+    OpenAPI_ref_to_binary_data_t ngapData;
+    OpenAPI_ng_ap_cause_t NgapCause;
+    OpenAPI_plmn_id_nid_t ServingNetwork;
+    OpenAPI_plmn_id_t *serving_plmn_id = NULL;
+
+    OpenAPI_ng_ran_target_id_t *targetId = NULL;
+    NGAP_TargetID_t *TargetID = NULL;
+
+    char *ue_context_id = NULL;
+    ogs_pkbuf_t *container_pkbuf = NULL;
+
+    ogs_assert(amf_ue);
+    ogs_assert(amf_ue->supi);
+
+    TargetID = (NGAP_TargetID_t *)data;
+    ogs_assert(TargetID);
+
+    ue_context_id = amf_ue_to_context_id(amf_ue);
+    ogs_assert(ue_context_id);
+
+    /* Build OpenAPI target_id from NGAP TargetID */
+    targetId = amf_nsmf_pdusession_build_target_id(TargetID);
+    if (!targetId) {
+        ogs_error("Failed to build target_id");
+        ogs_free(ue_context_id);
+        return NULL;
+    }
+
+    memset(&message, 0, sizeof(message));
+    message.h.method = (char *)OGS_SBI_HTTP_METHOD_POST;
+    message.h.service.name = (char *)OGS_SBI_SERVICE_NAME_NAMF_COMM;
+    message.h.api.version = (char *)OGS_SBI_API_V1;
+    message.h.resource.component[0] =
+            (char *)OGS_SBI_RESOURCE_NAME_UE_CONTEXTS;
+    message.h.resource.component[1] = ue_context_id;
+
+    /* Build UeContext (minimal for LBO handover) */
+    memset(&UeContext, 0, sizeof(UeContext));
+    UeContext.supi = amf_ue->supi;
+
+    /* Build N2InfoContent for SourceToTarget container */
+    memset(&sourceToTargetData, 0, sizeof(sourceToTargetData));
+    sourceToTargetData.ngap_ie_type = OpenAPI_ngap_ie_type_SRC_TO_TAR_CONTAINER;
+    memset(&ngapData, 0, sizeof(ngapData));
+    ngapData.content_id = (char *)"ngap-src-to-tar";
+    sourceToTargetData.ngap_data = &ngapData;
+
+    /* Build NGAP Cause */
+    memset(&NgapCause, 0, sizeof(NgapCause));
+    NgapCause.group = amf_ue->handover.group;
+    NgapCause.value = amf_ue->handover.cause;
+
+    /* Build Serving Network (source AMF's PLMN) */
+    memset(&ServingNetwork, 0, sizeof(ServingNetwork));
+    ogs_assert(ogs_local_conf()->num_of_serving_plmn_id);
+    serving_plmn_id = ogs_sbi_build_plmn_id(
+            &ogs_local_conf()->serving_plmn_id[0]);
+    ogs_assert(serving_plmn_id);
+    ServingNetwork.mcc = serving_plmn_id->mcc;
+    ServingNetwork.mnc = serving_plmn_id->mnc;
+
+    /* Build n2_notify_uri (callback URI for source AMF) */
+    server = ogs_sbi_server_first();
+    ogs_assert(server);
+
+    memset(&header, 0, sizeof(header));
+    header.service.name = (char *)OGS_SBI_SERVICE_NAME_NAMF_COMM;
+    header.api.version = (char *)OGS_SBI_API_V1;
+    header.resource.component[0] =
+            (char *)OGS_SBI_RESOURCE_NAME_UE_CONTEXTS;
+    header.resource.component[1] = amf_ue->supi;
+    header.resource.component[2] =
+            (char *)OGS_SBI_RESOURCE_NAME_N2_INFO_NOTIFY;
+
+    /* Build UeContextCreateData */
+    memset(&UeContextCreateData, 0, sizeof(UeContextCreateData));
+    UeContextCreateData.ue_context = &UeContext;
+    UeContextCreateData.target_id = targetId;
+    UeContextCreateData.source_to_target_data = &sourceToTargetData;
+    UeContextCreateData.pdu_session_list = OpenAPI_list_create();
+    UeContextCreateData.n2_notify_uri = ogs_sbi_server_uri(server, &header);
+    UeContextCreateData.ngap_cause = &NgapCause;
+    UeContextCreateData.serving_network = &ServingNetwork;
+
+    message.UeContextCreateData = &UeContextCreateData;
+
+    /* Add SourceToTarget container as binary multipart part */
+    container_pkbuf = ogs_pkbuf_alloc(NULL,
+            amf_ue->handover.container.size);
+    ogs_assert(container_pkbuf);
+    ogs_pkbuf_put_data(container_pkbuf,
+            amf_ue->handover.container.buf,
+            amf_ue->handover.container.size);
+
+    message.part[message.num_of_part].pkbuf = container_pkbuf;
+    message.part[message.num_of_part].content_id =
+            (char *)"ngap-src-to-tar";
+    message.part[message.num_of_part].content_type =
+            (char *)OGS_SBI_CONTENT_NGAP_TYPE;
+    message.num_of_part++;
+
+    request = ogs_sbi_build_request(&message);
+    ogs_expect(request);
+
+    /* Cleanup */
+    ogs_pkbuf_free(container_pkbuf);
+    if (UeContextCreateData.n2_notify_uri)
+        ogs_free(UeContextCreateData.n2_notify_uri);
+    if (UeContextCreateData.pdu_session_list)
+        OpenAPI_list_free(UeContextCreateData.pdu_session_list);
+    amf_nsmf_pdusession_free_target_id(targetId);
+    if (serving_plmn_id)
+        OpenAPI_plmn_id_free(serving_plmn_id);
+    ogs_free(ue_context_id);
 
     return request;
 }
