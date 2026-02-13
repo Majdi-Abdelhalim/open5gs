@@ -3703,6 +3703,98 @@ void ngap_handle_handover_request_ack(
 
     target_ue->ran_ue_ngap_id = *RAN_UE_NGAP_ID;
 
+    /*
+     * Inter-AMF handover: no source_ue on this AMF.
+     * Respond to deferred CreateUEContext with TargetToSource container.
+     */
+    amf_ue = amf_ue_find_by_id(target_ue->amf_ue_id);
+    if (amf_ue && amf_ue->inter_amf_handover) {
+        ogs_sbi_stream_t *stream = NULL;
+        ogs_sbi_message_t sendmsg;
+        ogs_sbi_response_t *response = NULL;
+        OpenAPI_ue_context_created_data_t UeContextCreatedData;
+        OpenAPI_ue_context_t UeContext;
+        OpenAPI_n2_info_content_t targetToSourceData;
+        OpenAPI_ref_to_binary_data_t ngapData;
+        ogs_pkbuf_t *container_pkbuf = NULL;
+
+        ogs_info("[HandoverRequestAck] Inter-AMF for [%s]", amf_ue->supi);
+
+        if (!TargetToSource_TransparentContainer) {
+            ogs_error("No TargetToSource_TransparentContainer");
+            stream = ogs_sbi_stream_find_by_id(
+                    amf_ue->create_ue_context_stream_id);
+            if (stream) {
+                ogs_assert(true == ogs_sbi_server_send_error(stream,
+                        OGS_SBI_HTTP_STATUS_INTERNAL_SERVER_ERROR,
+                        NULL,
+                        "No TargetToSource container in HandoverRequestAck",
+                        NULL, NULL));
+            }
+            amf_ue->create_ue_context_stream_id = OGS_INVALID_POOL_ID;
+            return;
+        }
+
+        /* Store TargetToSource container (overwrites SourceToTarget) */
+        OGS_ASN_STORE_DATA(&amf_ue->handover.container,
+                TargetToSource_TransparentContainer);
+
+        /* Recover deferred SBI stream */
+        stream = ogs_sbi_stream_find_by_id(
+                amf_ue->create_ue_context_stream_id);
+        if (!stream) {
+            ogs_error("Cannot find deferred CreateUEContext stream");
+            return;
+        }
+        amf_ue->create_ue_context_stream_id = OGS_INVALID_POOL_ID;
+
+        /* Build UeContextCreatedData response */
+        memset(&UeContext, 0, sizeof(UeContext));
+        UeContext.supi = amf_ue->supi;
+
+        memset(&ngapData, 0, sizeof(ngapData));
+        ngapData.content_id = (char *)"ngap-tar-to-src";
+
+        memset(&targetToSourceData, 0, sizeof(targetToSourceData));
+        targetToSourceData.ngap_ie_type =
+                OpenAPI_ngap_ie_type_TAR_TO_SRC_CONTAINER;
+        targetToSourceData.ngap_data = &ngapData;
+
+        memset(&UeContextCreatedData, 0, sizeof(UeContextCreatedData));
+        UeContextCreatedData.ue_context = &UeContext;
+        UeContextCreatedData.target_to_source_data = &targetToSourceData;
+
+        memset(&sendmsg, 0, sizeof(sendmsg));
+        sendmsg.UeContextCreatedData = &UeContextCreatedData;
+
+        /* Add TargetToSource container as binary multipart part */
+        container_pkbuf = ogs_pkbuf_alloc(NULL,
+                TargetToSource_TransparentContainer->size);
+        ogs_assert(container_pkbuf);
+        ogs_pkbuf_put_data(container_pkbuf,
+                TargetToSource_TransparentContainer->buf,
+                TargetToSource_TransparentContainer->size);
+
+        sendmsg.part[sendmsg.num_of_part].pkbuf = container_pkbuf;
+        sendmsg.part[sendmsg.num_of_part].content_id =
+                (char *)"ngap-tar-to-src";
+        sendmsg.part[sendmsg.num_of_part].content_type =
+                (char *)OGS_SBI_CONTENT_NGAP_TYPE;
+        sendmsg.num_of_part++;
+
+        response = ogs_sbi_build_response(&sendmsg,
+                OGS_SBI_HTTP_STATUS_CREATED);
+        ogs_assert(response);
+        ogs_assert(true ==
+                ogs_sbi_server_send_response(stream, response));
+
+        ogs_pkbuf_free(container_pkbuf);
+
+        ogs_info("[HandoverRequestAck] CreateUEContext 201 sent for [%s]",
+                amf_ue->supi);
+        return;
+    }
+
     source_ue = ran_ue_find_by_id(target_ue->source_ue_id);
     if (!source_ue) {
         ogs_error("Cannot find Source-UE Context [%lld]",
@@ -3715,7 +3807,7 @@ void ngap_handle_handover_request_ack(
         ogs_assert(r != OGS_ERROR);
         return;
     }
-    amf_ue = amf_ue_find_by_id(target_ue->amf_ue_id);
+    /* amf_ue already looked up above, but verify for intra-PLMN path */
     if (!amf_ue) {
         ogs_error("Cannot find AMF-UE Context [%lld]",
                 (long long)amf_ue_ngap_id);
@@ -3908,6 +4000,33 @@ void ngap_handle_handover_failure(
         ogs_expect(r == OGS_OK);
         ogs_assert(r != OGS_ERROR);
         return;
+    }
+
+    /*
+     * Inter-AMF handover failure: respond to deferred CreateUEContext
+     * with error and clean up the UE context.
+     */
+    {
+        amf_ue_t *amf_ue_check = amf_ue_find_by_id(target_ue->amf_ue_id);
+        if (amf_ue_check && amf_ue_check->inter_amf_handover) {
+            ogs_sbi_stream_t *stream = NULL;
+
+            ogs_warn("[HandoverFailure] Inter-AMF for [%s]",
+                    amf_ue_check->supi);
+
+            stream = ogs_sbi_stream_find_by_id(
+                    amf_ue_check->create_ue_context_stream_id);
+            if (stream) {
+                ogs_assert(true == ogs_sbi_server_send_error(stream,
+                        OGS_SBI_HTTP_STATUS_FORBIDDEN, NULL,
+                        "Handover failure at target gNB", NULL, NULL));
+            }
+            amf_ue_check->create_ue_context_stream_id = OGS_INVALID_POOL_ID;
+
+            amf_ue_remove(amf_ue_check);
+            ran_ue_remove(target_ue);
+            return;
+        }
     }
 
     source_ue = ran_ue_find_by_id(target_ue->source_ue_id);
