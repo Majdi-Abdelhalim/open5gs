@@ -32,6 +32,7 @@ ogs_sbi_request_t *amf_namf_comm_build_create_ue_context(
         amf_ue_t *amf_ue, void *data);
 ogs_sbi_request_t *amf_namf_comm_build_registration_status_update(
         amf_ue_t *amf_ue, void *data);
+ogs_sbi_request_t *amf_namf_comm_build_n2_info_notify(amf_ue_t *amf_ue);
 
 #ifdef __cplusplus
 }

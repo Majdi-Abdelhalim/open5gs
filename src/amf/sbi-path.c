@@ -21,6 +21,7 @@
 #include "nas-path.h"
 #include "ngap-path.h"
 #include "nnrf-handler.h"
+#include "namf-build.h"
 
 int amf_sbi_open(void)
 {
@@ -707,6 +708,61 @@ bool amf_sbi_send_n1_n2_failure_notify(
     request = amf_nsmf_callback_build_n1_n2_failure_notify(sess, cause);
     if (!request) {
         ogs_error("amf_nsmf_callback_build_n1_n2_failure_notify() failed");
+        return false;
+    }
+
+    rc = ogs_sbi_send_request_to_client(
+            client, client_notify_cb, request, NULL);
+    ogs_expect(rc == true);
+
+    ogs_sbi_request_free(request);
+
+    return rc;
+}
+
+bool amf_sbi_send_n2_info_notify(amf_ue_t *amf_ue)
+{
+    bool rc;
+    ogs_sbi_request_t *request = NULL;
+    ogs_sbi_client_t *client = NULL;
+
+    OpenAPI_uri_scheme_e scheme = OpenAPI_uri_scheme_NULL;
+    char *fqdn = NULL;
+    uint16_t fqdn_port = 0;
+    ogs_sockaddr_t *addr = NULL, *addr6 = NULL;
+
+    ogs_assert(amf_ue);
+    ogs_assert(amf_ue->n2_notify_uri);
+
+    rc = ogs_sbi_getaddr_from_uri(
+            &scheme, &fqdn, &fqdn_port, &addr, &addr6,
+            amf_ue->n2_notify_uri);
+    if (rc == false || scheme == OpenAPI_uri_scheme_NULL) {
+        ogs_error("[%s] Invalid n2_notify_uri [%s]",
+                amf_ue->supi, amf_ue->n2_notify_uri);
+        return false;
+    }
+
+    client = ogs_sbi_client_find(scheme, fqdn, fqdn_port, addr, addr6);
+    if (!client) {
+        client = ogs_sbi_client_add(scheme, fqdn, fqdn_port, addr, addr6);
+        if (!client) {
+            ogs_error("[%s] ogs_sbi_client_add() failed", amf_ue->supi);
+            ogs_free(fqdn);
+            ogs_freeaddrinfo(addr);
+            ogs_freeaddrinfo(addr6);
+            return false;
+        }
+    }
+
+    ogs_free(fqdn);
+    ogs_freeaddrinfo(addr);
+    ogs_freeaddrinfo(addr6);
+
+    request = amf_namf_comm_build_n2_info_notify(amf_ue);
+    if (!request) {
+        ogs_error("[%s] amf_namf_comm_build_n2_info_notify() failed",
+                amf_ue->supi);
         return false;
     }
 

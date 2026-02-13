@@ -4441,18 +4441,6 @@ void ngap_handle_handover_notification(
         return;
     }
 
-    source_ue = ran_ue_find_by_id(target_ue->source_ue_id);
-    if (!source_ue) {
-        ogs_error("Cannot find Source-UE Context [%lld]",
-                (long long)amf_ue_ngap_id);
-        r = ngap_send_error_indication(
-                gnb, &target_ue->ran_ue_ngap_id, &target_ue->amf_ue_ngap_id,
-                NGAP_Cause_PR_radioNetwork,
-                NGAP_CauseRadioNetwork_inconsistent_remote_UE_NGAP_ID);
-        ogs_expect(r == OGS_OK);
-        ogs_assert(r != OGS_ERROR);
-        return;
-    }
     amf_ue = amf_ue_find_by_id(target_ue->amf_ue_id);
     if (!amf_ue) {
         ogs_error("Cannot find AMF-UE Context [%lld]",
@@ -4465,8 +4453,6 @@ void ngap_handle_handover_notification(
         ogs_assert(r != OGS_ERROR);
         return;
     }
-
-    amf_ue_associate_ran_ue(amf_ue, target_ue);
 
     if (!UserLocationInformation) {
         ogs_error("No UserLocationInformation");
@@ -4495,6 +4481,53 @@ void ngap_handle_handover_notification(
             &UserLocationInformationNR->nR_CGI, &target_ue->saved.nr_cgi);
     ogs_ngap_ASN_to_5gs_tai(
             &UserLocationInformationNR->tAI, &target_ue->saved.nr_tai);
+
+    /*
+     * Inter-AMF handover (LBO): no source_ue on the target AMF.
+     * Associate UE with the target ran_ue, update location,
+     * and notify the source AMF via N2InfoNotify.
+     */
+    if (amf_ue->inter_amf_handover) {
+        ogs_info("[%s] Inter-AMF HandoverNotify", amf_ue->supi);
+
+        amf_ue_associate_ran_ue(amf_ue, target_ue);
+
+        /* Copy Stream-No/TAI/ECGI from ran_ue */
+        amf_ue->gnb_ostream_id = target_ue->gnb_ostream_id;
+        memcpy(&amf_ue->nr_tai,
+                &target_ue->saved.nr_tai, sizeof(ogs_5gs_tai_t));
+        memcpy(&amf_ue->nr_cgi,
+                &target_ue->saved.nr_cgi, sizeof(ogs_nr_cgi_t));
+
+        /* Send N2InfoNotify (HANDOVER_COMPLETED) to source AMF */
+        if (amf_ue->n2_notify_uri) {
+            bool rc;
+            rc = amf_sbi_send_n2_info_notify(amf_ue);
+            if (!rc)
+                ogs_error("[%s] amf_sbi_send_n2_info_notify() failed",
+                        amf_ue->supi);
+        } else {
+            ogs_error("[%s] No n2_notify_uri for inter-AMF handover",
+                    amf_ue->supi);
+        }
+
+        return;
+    }
+
+    source_ue = ran_ue_find_by_id(target_ue->source_ue_id);
+    if (!source_ue) {
+        ogs_error("Cannot find Source-UE Context [%lld]",
+                (long long)amf_ue_ngap_id);
+        r = ngap_send_error_indication(
+                gnb, &target_ue->ran_ue_ngap_id, &target_ue->amf_ue_ngap_id,
+                NGAP_Cause_PR_radioNetwork,
+                NGAP_CauseRadioNetwork_inconsistent_remote_UE_NGAP_ID);
+        ogs_expect(r == OGS_OK);
+        ogs_assert(r != OGS_ERROR);
+        return;
+    }
+
+    amf_ue_associate_ran_ue(amf_ue, target_ue);
 
     ogs_debug("    Source : RAN_UE_NGAP_ID[%lld] AMF_UE_NGAP_ID[%lld] ",
         (long long)source_ue->ran_ue_ngap_id,

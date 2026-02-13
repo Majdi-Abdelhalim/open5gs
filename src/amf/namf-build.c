@@ -21,6 +21,8 @@
 #include "namf-handler.h"
 #include "nsmf-build.h"
 
+#include "openapi/model/n2_information_notification.h"
+
 static char* ogs_guti_to_string(ogs_nas_5gs_guti_t *nas_guti)
 {
     ogs_plmn_id_t plmn_id;
@@ -333,6 +335,68 @@ ogs_sbi_request_t *amf_namf_comm_build_registration_status_update(
 
     if (ue_context_id)
         ogs_free(ue_context_id);
+
+    return request;
+}
+
+ogs_sbi_request_t *amf_namf_comm_build_n2_info_notify(amf_ue_t *amf_ue)
+{
+    ogs_sbi_request_t *request = NULL;
+    cJSON *item = NULL;
+
+    OpenAPI_n2_information_notification_t N2InformationNotification;
+    OpenAPI_guami_t *Guami = NULL;
+
+    ogs_assert(amf_ue);
+    ogs_assert(amf_ue->n2_notify_uri);
+    ogs_assert(amf_ue->guami);
+
+    memset(&N2InformationNotification, 0, sizeof(N2InformationNotification));
+
+    N2InformationNotification.n2_notify_subscription_id =
+            amf_ue->supi ? amf_ue->supi : (char *)"unknown";
+    N2InformationNotification.notify_reason =
+            OpenAPI_n2_info_notify_reason_HANDOVER_COMPLETED;
+
+    Guami = ogs_sbi_build_guami(amf_ue->guami);
+    if (!Guami) {
+        ogs_error("ogs_sbi_build_guami() failed");
+        return NULL;
+    }
+    N2InformationNotification.guami = Guami;
+
+    request = ogs_sbi_request_new();
+    if (!request) {
+        ogs_error("ogs_sbi_request_new() failed");
+        ogs_sbi_free_guami(Guami);
+        return NULL;
+    }
+
+    request->h.method = ogs_strdup(OGS_SBI_HTTP_METHOD_POST);
+    request->h.uri = ogs_strdup(amf_ue->n2_notify_uri);
+
+    item = OpenAPI_n2_information_notification_convertToJSON(
+            &N2InformationNotification);
+    ogs_sbi_free_guami(Guami);
+
+    if (!item) {
+        ogs_error("OpenAPI_n2_information_notification_convertToJSON() failed");
+        ogs_sbi_request_free(request);
+        return NULL;
+    }
+
+    request->http.content = cJSON_PrintUnformatted(item);
+    cJSON_Delete(item);
+
+    if (!request->http.content) {
+        ogs_error("cJSON_PrintUnformatted() failed");
+        ogs_sbi_request_free(request);
+        return NULL;
+    }
+    request->http.content_length = strlen(request->http.content);
+
+    ogs_sbi_header_set(request->http.headers,
+            OGS_SBI_CONTENT_TYPE, OGS_SBI_CONTENT_JSON_TYPE);
 
     return request;
 }
