@@ -1681,6 +1681,9 @@ amf_ue_t *amf_ue_add(ran_ue_t *ran_ue)
     amf_ue->nas.amf.ksi = OGS_NAS_KSI_NO_KEY_IS_AVAILABLE;
     amf_ue->abba_len = 2;
 
+    /* Inter-AMF Handover */
+    amf_ue->create_ue_context_stream_id = OGS_INVALID_POOL_ID;
+
     amf_ue_fsm_init(amf_ue);
 
     ogs_list_add(&self.amf_ue_list, amf_ue);
@@ -1761,6 +1764,12 @@ void amf_ue_remove(amf_ue_t *amf_ue)
 
     /* Clear Transparent Container */
     OGS_ASN_CLEAR_DATA(&amf_ue->handover.container);
+
+    /* Clear Inter-AMF Handover */
+    if (amf_ue->n2_notify_uri)
+        ogs_free(amf_ue->n2_notify_uri);
+    amf_ue->inter_amf_handover = false;
+    amf_ue->create_ue_context_stream_id = OGS_INVALID_POOL_ID;
 
     /* Delete All Timers */
     CLEAR_AMF_UE_ALL_TIMERS(amf_ue);

@@ -624,6 +624,11 @@ struct amf_ue_s {
         long cause;
     } handover;
 
+    /* Inter-AMF Handover (N14) */
+    bool inter_amf_handover;
+    char *n2_notify_uri;
+    ogs_pool_id_t create_ue_context_stream_id;
+
     /* SubscriptionId of Subscription to Data Change Notification to UDM */
 #define UDM_SDM_SUBSCRIBED(__aMF) \
     ((__aMF) && ((__aMF)->data_change_subscription.id))
