@@ -18,6 +18,7 @@
  */
 
 #include "namf-build.h"
+#include "namf-handler.h"
 #include "nsmf-build.h"
 
 static char* ogs_guti_to_string(ogs_nas_5gs_guti_t *nas_guti)
@@ -115,6 +116,14 @@ ogs_sbi_request_t *amf_namf_comm_build_create_ue_context(
     OpenAPI_plmn_id_nid_t ServingNetwork;
     OpenAPI_plmn_id_t *serving_plmn_id = NULL;
 
+    OpenAPI_seaf_data_t SeafData;
+    OpenAPI_ng_ksi_t Ng_ksi;
+    OpenAPI_key_amf_t Key_amf;
+    OpenAPI_ambr_t *UeAmbr = NULL;
+    OpenAPI_list_t *MmContextList = NULL;
+    char *encoded_gmm_capability = NULL;
+    char hxkamf_string[OGS_KEYSTRLEN(OGS_SHA256_DIGEST_SIZE)];
+
     OpenAPI_ng_ran_target_id_t *targetId = NULL;
     NGAP_TargetID_t *TargetID = NULL;
 
@@ -146,9 +155,49 @@ ogs_sbi_request_t *amf_namf_comm_build_create_ue_context(
             (char *)OGS_SBI_RESOURCE_NAME_UE_CONTEXTS;
     message.h.resource.component[1] = ue_context_id;
 
-    /* Build UeContext (minimal for LBO handover) */
+    /* Build UeContext with security context for handover */
     memset(&UeContext, 0, sizeof(UeContext));
     UeContext.supi = amf_ue->supi;
+
+    if (amf_ue->pei)
+        UeContext.pei = amf_ue->pei;
+
+    /* SeafData: KAMF and ngKSI */
+    memset(&SeafData, 0, sizeof(SeafData));
+    memset(&Ng_ksi, 0, sizeof(Ng_ksi));
+    memset(&Key_amf, 0, sizeof(Key_amf));
+    Ng_ksi.tsc = (amf_ue->nas.ue.tsc == 0) ?
+            OpenAPI_sc_type_NATIVE : OpenAPI_sc_type_MAPPED;
+    Ng_ksi.ksi = (int)amf_ue->nas.ue.ksi;
+    SeafData.ng_ksi = &Ng_ksi;
+    Key_amf.key_type = (OpenAPI_key_amf_type_e)OpenAPI_key_amf_type_KAMF;
+    ogs_hex_to_ascii(amf_ue->kamf, sizeof(amf_ue->kamf),
+            hxkamf_string, sizeof(hxkamf_string));
+    Key_amf.key_val = hxkamf_string;
+    SeafData.key_amf = &Key_amf;
+    UeContext.seaf_data = &SeafData;
+
+    /* UE AMBR */
+    if (amf_ue->ue_ambr.uplink > 0 || amf_ue->ue_ambr.downlink > 0) {
+        UeAmbr = ogs_calloc(1, sizeof(*UeAmbr));
+        ogs_assert(UeAmbr);
+        if (amf_ue->ue_ambr.uplink > 0)
+            UeAmbr->uplink = ogs_sbi_bitrate_to_string(
+                    amf_ue->ue_ambr.uplink, OGS_SBI_BITRATE_KBPS);
+        if (amf_ue->ue_ambr.downlink > 0)
+            UeAmbr->downlink = ogs_sbi_bitrate_to_string(
+                    amf_ue->ue_ambr.downlink, OGS_SBI_BITRATE_KBPS);
+        UeContext.sub_ue_ambr = UeAmbr;
+    }
+
+    /* 5GMM Capability */
+    encoded_gmm_capability =
+            amf_namf_comm_base64_encode_5gmm_capability(amf_ue);
+    UeContext._5g_mm_capability = encoded_gmm_capability;
+
+    /* MmContextList: NAS security mode, UE security capability, allowed NSSAI */
+    MmContextList = amf_namf_comm_encode_ue_mm_context_list(amf_ue);
+    UeContext.mm_context_list = MmContextList;
 
     /* Build N2InfoContent for SourceToTarget container */
     memset(&sourceToTargetData, 0, sizeof(sourceToTargetData));
@@ -223,6 +272,12 @@ ogs_sbi_request_t *amf_namf_comm_build_create_ue_context(
     amf_nsmf_pdusession_free_target_id(targetId);
     if (serving_plmn_id)
         OpenAPI_plmn_id_free(serving_plmn_id);
+    if (encoded_gmm_capability)
+        ogs_free(encoded_gmm_capability);
+    if (UeAmbr)
+        OpenAPI_ambr_free(UeAmbr);
+    if (MmContextList)
+        amf_namf_comm_free_mm_context_list(MmContextList);
     ogs_free(ue_context_id);
 
     return request;

@@ -2637,6 +2637,26 @@ static int parse_json(ogs_sbi_message_t *message,
         CASE(OGS_SBI_SERVICE_NAME_NAMF_COMM)
             SWITCH(message->h.resource.component[0])
             CASE(OGS_SBI_RESOURCE_NAME_UE_CONTEXTS)
+                if (!message->h.resource.component[2]) {
+                    /* CreateUEContext: POST /ue-contexts/{supi} */
+                    if (message->res_status == 0) {
+                        message->UeContextCreateData =
+                            OpenAPI_ue_context_create_data_parseFromJSON(item);
+                        if (!message->UeContextCreateData) {
+                            rv = OGS_ERROR;
+                            ogs_error("JSON parse error");
+                        }
+                    } else if (message->res_status ==
+                                OGS_SBI_HTTP_STATUS_CREATED) {
+                        message->UeContextCreatedData =
+                            OpenAPI_ue_context_created_data_parseFromJSON(item);
+                        if (!message->UeContextCreatedData) {
+                            rv = OGS_ERROR;
+                            ogs_error("JSON parse error");
+                        }
+                    }
+                    break;
+                }
                 SWITCH(message->h.resource.component[2])
                 CASE(OGS_SBI_RESOURCE_NAME_N1_N2_MESSAGES)
                     if (message->res_status == 0) {

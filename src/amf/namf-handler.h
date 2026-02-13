@@ -42,6 +42,15 @@ int amf_namf_comm_handle_registration_status_update_request(
         ogs_sbi_stream_t *stream, ogs_sbi_message_t *recvmsg);
 int amf_namf_comm_handle_registration_status_update_response(
         ogs_sbi_message_t *recvmsg, amf_ue_t *amf_ue);
+int amf_namf_comm_handle_create_ue_context_request(
+        ogs_sbi_stream_t *stream, ogs_sbi_message_t *recvmsg);
+
+/* Encoding helpers (used by namf-build.c) */
+char *amf_namf_comm_base64_encode_5gmm_capability(amf_ue_t *amf_ue);
+OpenAPI_list_t *amf_namf_comm_encode_ue_mm_context_list(amf_ue_t *amf_ue);
+void amf_namf_comm_free_mm_context_list(OpenAPI_list_t *MmContextList);
+void amf_namf_comm_decode_ue_mm_context_list(
+        amf_ue_t *amf_ue, OpenAPI_list_t *MmContextList);
 
 #ifdef __cplusplus
 }

@@ -1092,10 +1092,7 @@ cleanup:
 
 static char *amf_namf_comm_base64_encode_ue_security_capability(
         ogs_nas_ue_security_capability_t ue_security_capability);
-static char *amf_namf_comm_base64_encode_5gmm_capability(amf_ue_t *amf_ue);
 static OpenAPI_list_t *amf_namf_comm_encode_ue_session_context_list(
-        amf_ue_t *amf_ue);
-static OpenAPI_list_t *amf_namf_comm_encode_ue_mm_context_list(
         amf_ue_t *amf_ue);
 
 int amf_namf_comm_handle_ue_context_transfer_request(
@@ -1295,8 +1292,6 @@ static ogs_nas_5gmm_capability_t
         amf_namf_comm_base64_decode_5gmm_capability(char *encoded);
 static ogs_nas_ue_security_capability_t
         amf_namf_comm_base64_decode_ue_security_capability(char *encoded);
-static void amf_namf_comm_decode_ue_mm_context_list(
-            amf_ue_t *amf_ue, OpenAPI_list_t *MmContextList);
 static void amf_namf_comm_decode_ue_session_context_list(
             amf_ue_t *amf_ue, OpenAPI_list_t *SessionContextList);
 
@@ -1422,7 +1417,7 @@ static char *amf_namf_comm_base64_encode_ue_security_capability(
     return enc;
 }
 
-static char *amf_namf_comm_base64_encode_5gmm_capability(amf_ue_t *amf_ue)
+char *amf_namf_comm_base64_encode_5gmm_capability(amf_ue_t *amf_ue)
 {
     ogs_nas_5gmm_capability_t nas_gmm_capability;
     int enc_len = 0;
@@ -1505,7 +1500,7 @@ static OpenAPI_list_t *amf_namf_comm_encode_ue_session_context_list(
     return PduSessionList;
 }
 
-static OpenAPI_list_t *amf_namf_comm_encode_ue_mm_context_list(amf_ue_t *amf_ue)
+OpenAPI_list_t *amf_namf_comm_encode_ue_mm_context_list(amf_ue_t *amf_ue)
 {
     OpenAPI_list_t *MmContextList = NULL;
     OpenAPI_mm_context_t *MmContext = NULL;
@@ -1659,7 +1654,22 @@ static ogs_nas_ue_security_capability_t
     return ue_security_capability;
 }
 
-static void amf_namf_comm_decode_ue_mm_context_list(
+void amf_namf_comm_free_mm_context_list(OpenAPI_list_t *MmContextList)
+{
+    OpenAPI_lnode_t *node = NULL;
+    OpenAPI_mm_context_t *MmContext = NULL;
+
+    if (!MmContextList)
+        return;
+
+    OpenAPI_list_for_each(MmContextList, node) {
+        MmContext = node->data;
+        OpenAPI_mm_context_free(MmContext);
+    }
+    OpenAPI_list_free(MmContextList);
+}
+
+void amf_namf_comm_decode_ue_mm_context_list(
             amf_ue_t *amf_ue, OpenAPI_list_t *MmContextList) {
 
     OpenAPI_lnode_t *node = NULL;
@@ -1966,6 +1976,248 @@ int amf_namf_comm_handle_registration_status_update_response(
         ogs_sbi_message_t *recvmsg, amf_ue_t *amf_ue) {
 
     /* Nothing to do */
+
+    return OGS_OK;
+}
+
+int amf_namf_comm_handle_create_ue_context_request(
+        ogs_sbi_stream_t *stream, ogs_sbi_message_t *recvmsg)
+{
+    int r;
+    amf_ue_t *amf_ue = NULL;
+    amf_gnb_t *target_gnb = NULL;
+    ran_ue_t *target_ue = NULL;
+
+    OpenAPI_ue_context_create_data_t *CreateData = NULL;
+    OpenAPI_ue_context_t *UeContext = NULL;
+    OpenAPI_ng_ran_target_id_t *targetId = NULL;
+    OpenAPI_n2_info_content_t *sourceToTargetData = NULL;
+
+    ogs_pkbuf_t *n2buf = NULL;
+    uint32_t target_gnb_id = 0;
+
+    ogs_assert(stream);
+    ogs_assert(recvmsg);
+
+    CreateData = recvmsg->UeContextCreateData;
+    if (!CreateData) {
+        ogs_error("No UeContextCreateData");
+        ogs_assert(true == ogs_sbi_server_send_error(stream,
+                OGS_SBI_HTTP_STATUS_BAD_REQUEST, recvmsg,
+                "No UeContextCreateData", NULL, NULL));
+        return OGS_ERROR;
+    }
+
+    UeContext = CreateData->ue_context;
+    if (!UeContext) {
+        ogs_error("No UeContext");
+        ogs_assert(true == ogs_sbi_server_send_error(stream,
+                OGS_SBI_HTTP_STATUS_BAD_REQUEST, recvmsg,
+                "No UeContext", NULL, NULL));
+        return OGS_ERROR;
+    }
+
+    if (!UeContext->supi) {
+        ogs_error("No SUPI in UeContext");
+        ogs_assert(true == ogs_sbi_server_send_error(stream,
+                OGS_SBI_HTTP_STATUS_BAD_REQUEST, recvmsg,
+                "No SUPI", NULL, NULL));
+        return OGS_ERROR;
+    }
+
+    /* Extract target gNB ID from target_id */
+    targetId = CreateData->target_id;
+    if (!targetId || !targetId->ran_node_id ||
+            !targetId->ran_node_id->g_nb_id ||
+            !targetId->ran_node_id->g_nb_id->g_nb_value) {
+        ogs_error("No target gNB ID in CreateUEContext");
+        ogs_assert(true == ogs_sbi_server_send_error(stream,
+                OGS_SBI_HTTP_STATUS_BAD_REQUEST, recvmsg,
+                "No target gNB ID", NULL, NULL));
+        return OGS_ERROR;
+    }
+
+    /* Convert hex string gNB value to uint32 */
+    {
+        uint8_t gnb_id_buf[4];
+        int len;
+        memset(gnb_id_buf, 0, sizeof(gnb_id_buf));
+        len = ogs_ascii_to_hex(
+                targetId->ran_node_id->g_nb_id->g_nb_value,
+                strlen(targetId->ran_node_id->g_nb_id->g_nb_value),
+                gnb_id_buf, sizeof(gnb_id_buf));
+        if (len <= 0) {
+            ogs_error("Failed to decode gNB ID [%s]",
+                    targetId->ran_node_id->g_nb_id->g_nb_value);
+            ogs_assert(true == ogs_sbi_server_send_error(stream,
+                    OGS_SBI_HTTP_STATUS_BAD_REQUEST, recvmsg,
+                    "Invalid gNB ID", NULL, NULL));
+            return OGS_ERROR;
+        }
+        target_gnb_id = 0;
+        memcpy(((uint8_t *)&target_gnb_id) + (4 - len), gnb_id_buf, len);
+        target_gnb_id = be32toh(target_gnb_id);
+    }
+
+    ogs_info("[CreateUEContext] SUPI[%s] gNB-id[0x%x]",
+            UeContext->supi, target_gnb_id);
+
+    /* Find target gNB connected to this AMF */
+    target_gnb = amf_gnb_find_by_gnb_id(target_gnb_id);
+    if (!target_gnb) {
+        ogs_error("Cannot find target gNB-id[0x%x]", target_gnb_id);
+        ogs_assert(true == ogs_sbi_server_send_error(stream,
+                OGS_SBI_HTTP_STATUS_FORBIDDEN, recvmsg,
+                "Target gNB not found", NULL, NULL));
+        return OGS_ERROR;
+    }
+
+    /* Create target RAN UE */
+    target_ue = ran_ue_add(target_gnb, INVALID_UE_NGAP_ID);
+    if (!target_ue) {
+        ogs_error("Failed to create target RAN UE");
+        ogs_assert(true == ogs_sbi_server_send_error(stream,
+                OGS_SBI_HTTP_STATUS_INTERNAL_SERVER_ERROR, recvmsg,
+                "Failed to create RAN UE", NULL, NULL));
+        return OGS_ERROR;
+    }
+
+    /* Create AMF UE context on target AMF */
+    amf_ue = amf_ue_add(target_ue);
+    if (!amf_ue) {
+        ogs_error("Failed to create AMF UE context");
+        ran_ue_remove(target_ue);
+        ogs_assert(true == ogs_sbi_server_send_error(stream,
+                OGS_SBI_HTTP_STATUS_INTERNAL_SERVER_ERROR, recvmsg,
+                "Failed to create UE context", NULL, NULL));
+        return OGS_ERROR;
+    }
+
+    /* Associate AMF UE with target RAN UE */
+    amf_ue_associate_ran_ue(amf_ue, target_ue);
+
+    /* Set SUPI */
+    amf_ue_set_supi(amf_ue, UeContext->supi);
+
+    /* Set PEI */
+    if (UeContext->pei) {
+        if (amf_ue->pei) ogs_free(amf_ue->pei);
+        amf_ue->pei = ogs_strdup(UeContext->pei);
+    }
+
+    /* Set UE AMBR */
+    if (UeContext->sub_ue_ambr) {
+        if (UeContext->sub_ue_ambr->downlink)
+            amf_ue->ue_ambr.downlink =
+                ogs_sbi_bitrate_from_string(UeContext->sub_ue_ambr->downlink);
+        if (UeContext->sub_ue_ambr->uplink)
+            amf_ue->ue_ambr.uplink =
+                ogs_sbi_bitrate_from_string(UeContext->sub_ue_ambr->uplink);
+    }
+
+    /* Set SeafData: KAMF and ngKSI */
+    if (UeContext->seaf_data) {
+        if (UeContext->seaf_data->ng_ksi &&
+                UeContext->seaf_data->ng_ksi->tsc != OpenAPI_sc_type_NULL) {
+            amf_ue->nas.ue.tsc =
+                (UeContext->seaf_data->ng_ksi->tsc ==
+                    OpenAPI_sc_type_NATIVE) ? 0 : 1;
+            amf_ue->nas.ue.ksi =
+                (uint8_t)UeContext->seaf_data->ng_ksi->ksi;
+        }
+        if (UeContext->seaf_data->key_amf &&
+                UeContext->seaf_data->key_amf->key_val) {
+            ogs_ascii_to_hex(
+                    UeContext->seaf_data->key_amf->key_val,
+                    strlen(UeContext->seaf_data->key_amf->key_val),
+                    amf_ue->kamf, sizeof(amf_ue->kamf));
+        }
+    }
+
+    /* Set MmContext: NAS security, UE security capability, allowed NSSAI */
+    if (UeContext->mm_context_list)
+        amf_namf_comm_decode_ue_mm_context_list(
+                amf_ue, UeContext->mm_context_list);
+
+    /* Set inter-AMF handover flag */
+    amf_ue->inter_amf_handover = true;
+
+    /* Store n2_notify_uri from source AMF */
+    if (CreateData->n2_notify_uri) {
+        if (amf_ue->n2_notify_uri) ogs_free(amf_ue->n2_notify_uri);
+        amf_ue->n2_notify_uri = ogs_strdup(CreateData->n2_notify_uri);
+    }
+
+    /* Set handover cause from NGAP cause */
+    if (CreateData->ngap_cause) {
+        amf_ue->handover.group = CreateData->ngap_cause->group;
+        amf_ue->handover.cause = CreateData->ngap_cause->value;
+    }
+
+    /* Set handover type (intra-5GS by default) */
+    amf_ue->handover.type = NGAP_HandoverType_intra5gs;
+
+    /* Derive NH/NCC from KAMF for SecurityContext in HandoverRequest */
+    amf_ue->nhcc++;
+    ogs_kdf_nh_gnb(amf_ue->kamf, amf_ue->nh, amf_ue->nh);
+
+    /* Extract SourceToTarget container from multipart binary part */
+    sourceToTargetData = CreateData->source_to_target_data;
+    if (!sourceToTargetData || !sourceToTargetData->ngap_data ||
+            !sourceToTargetData->ngap_data->content_id) {
+        ogs_error("No SourceToTarget container");
+        amf_ue_remove(amf_ue);
+        ran_ue_remove(target_ue);
+        ogs_assert(true == ogs_sbi_server_send_error(stream,
+                OGS_SBI_HTTP_STATUS_BAD_REQUEST, recvmsg,
+                "No SourceToTarget container", NULL, NULL));
+        return OGS_ERROR;
+    }
+
+    n2buf = ogs_sbi_find_part_by_content_id(
+            recvmsg, sourceToTargetData->ngap_data->content_id);
+    if (!n2buf) {
+        ogs_error("No binary SourceToTarget container");
+        amf_ue_remove(amf_ue);
+        ran_ue_remove(target_ue);
+        ogs_assert(true == ogs_sbi_server_send_error(stream,
+                OGS_SBI_HTTP_STATUS_BAD_REQUEST, recvmsg,
+                "No SourceToTarget binary data", NULL, NULL));
+        return OGS_ERROR;
+    }
+
+    /* Store SourceToTarget container */
+    amf_ue->handover.container.size = n2buf->len;
+    amf_ue->handover.container.buf = CALLOC(n2buf->len, sizeof(uint8_t));
+    ogs_assert(amf_ue->handover.container.buf);
+    memcpy(amf_ue->handover.container.buf, n2buf->data, n2buf->len);
+
+    /* Defer SBI response until HandoverRequestAck comes from target gNB */
+    amf_ue->create_ue_context_stream_id = ogs_sbi_id_from_stream(stream);
+
+    /* Send HandoverRequest to target gNB */
+    {
+        ogs_pkbuf_t *ngapbuf = NULL;
+
+        ngapbuf = ngap_build_handover_request(target_ue);
+        if (!ngapbuf) {
+            ogs_error("ngap_build_handover_request() failed");
+            amf_ue->create_ue_context_stream_id = OGS_INVALID_POOL_ID;
+            amf_ue_remove(amf_ue);
+            ran_ue_remove(target_ue);
+            ogs_assert(true == ogs_sbi_server_send_error(stream,
+                    OGS_SBI_HTTP_STATUS_INTERNAL_SERVER_ERROR, recvmsg,
+                    "Failed to build HandoverRequest", NULL, NULL));
+            return OGS_ERROR;
+        }
+
+        r = ngap_send_to_ran_ue(target_ue, ngapbuf);
+        ogs_expect(r == OGS_OK);
+        ogs_assert(r != OGS_ERROR);
+    }
+
+    ogs_info("[CreateUEContext] HandoverRequest sent to gNB[0x%x] for [%s]",
+            target_gnb_id, amf_ue->supi);
 
     return OGS_OK;
 }
