@@ -2221,3 +2221,93 @@ int amf_namf_comm_handle_create_ue_context_request(
 
     return OGS_OK;
 }
+
+int amf_namf_comm_handle_create_ue_context_response(
+        ogs_sbi_message_t *recvmsg, amf_ue_t *amf_ue)
+{
+    int r;
+    OpenAPI_ue_context_created_data_t *CreatedData = NULL;
+    OpenAPI_n2_info_content_t *targetToSourceData = NULL;
+    ogs_pkbuf_t *n2buf = NULL;
+    ran_ue_t *source_ue = NULL;
+
+    ogs_assert(amf_ue);
+    ogs_assert(recvmsg);
+
+    if (recvmsg->res_status != OGS_SBI_HTTP_STATUS_CREATED) {
+        ogs_error("[%s] CreateUEContext failed [%d]",
+                amf_ue->supi, recvmsg->res_status);
+
+        source_ue = ran_ue_find_by_id(amf_ue->ran_ue_id);
+        if (source_ue) {
+            NGAP_Cause_t cause;
+            memset(&cause, 0, sizeof(cause));
+            cause.present = NGAP_Cause_PR_radioNetwork;
+            cause.choice.radioNetwork =
+                NGAP_CauseRadioNetwork_ho_failure_in_target_5GC_ngran_node_or_target_system;
+
+            r = ngap_send_handover_preparation_failure(source_ue, &cause);
+            ogs_expect(r == OGS_OK);
+            ogs_assert(r != OGS_ERROR);
+        }
+
+        amf_ue->inter_amf_handover = false;
+        return OGS_ERROR;
+    }
+
+    CreatedData = recvmsg->UeContextCreatedData;
+    if (!CreatedData) {
+        ogs_error("[%s] No UeContextCreatedData", amf_ue->supi);
+        goto failure;
+    }
+
+    targetToSourceData = CreatedData->target_to_source_data;
+    if (!targetToSourceData || !targetToSourceData->ngap_data ||
+            !targetToSourceData->ngap_data->content_id) {
+        ogs_error("[%s] No TargetToSource container in response", amf_ue->supi);
+        goto failure;
+    }
+
+    n2buf = ogs_sbi_find_part_by_content_id(
+            recvmsg, targetToSourceData->ngap_data->content_id);
+    if (!n2buf) {
+        ogs_error("[%s] No binary TargetToSource data", amf_ue->supi);
+        goto failure;
+    }
+
+    /* Store TargetToSource container (overwrites SourceToTarget) */
+    OGS_ASN_CLEAR_DATA(&amf_ue->handover.container);
+    amf_ue->handover.container.size = n2buf->len;
+    amf_ue->handover.container.buf = CALLOC(n2buf->len, sizeof(uint8_t));
+    ogs_assert(amf_ue->handover.container.buf);
+    memcpy(amf_ue->handover.container.buf, n2buf->data, n2buf->len);
+
+    /* Send HandoverCommand to source gNB */
+    r = ngap_send_handover_command(amf_ue);
+    if (r != OGS_OK) {
+        ogs_error("[%s] ngap_send_handover_command() failed", amf_ue->supi);
+        goto failure;
+    }
+
+    ogs_info("[%s] HandoverCommand sent to source gNB (inter-AMF)",
+            amf_ue->supi);
+
+    return OGS_OK;
+
+failure:
+    source_ue = ran_ue_find_by_id(amf_ue->ran_ue_id);
+    if (source_ue) {
+        NGAP_Cause_t cause;
+        memset(&cause, 0, sizeof(cause));
+        cause.present = NGAP_Cause_PR_radioNetwork;
+        cause.choice.radioNetwork =
+            NGAP_CauseRadioNetwork_ho_failure_in_target_5GC_ngran_node_or_target_system;
+
+        r = ngap_send_handover_preparation_failure(source_ue, &cause);
+        ogs_expect(r == OGS_OK);
+        ogs_assert(r != OGS_ERROR);
+    }
+
+    amf_ue->inter_amf_handover = false;
+    return OGS_ERROR;
+}
