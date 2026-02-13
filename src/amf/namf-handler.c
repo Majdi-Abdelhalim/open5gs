@@ -24,6 +24,8 @@
 #include "ngap-path.h"
 #include "sbi-path.h"
 
+#include "openapi/model/n2_information_notification.h"
+
 int amf_namf_comm_handle_n1_n2_message_transfer(
         ogs_sbi_stream_t *stream, ogs_sbi_message_t *recvmsg)
 {
@@ -2310,4 +2312,97 @@ failure:
 
     amf_ue->inter_amf_handover = false;
     return OGS_ERROR;
+}
+
+int amf_namf_comm_handle_n2_info_notify(
+        ogs_sbi_stream_t *stream, ogs_sbi_message_t *recvmsg,
+        ogs_sbi_request_t *sbi_request)
+{
+    int r;
+    amf_ue_t *amf_ue = NULL;
+    ran_ue_t *ran_ue = NULL;
+
+    OpenAPI_n2_information_notification_t *N2InformationNotification = NULL;
+    cJSON *item = NULL;
+
+    ogs_sbi_response_t *response = NULL;
+
+    ogs_assert(stream);
+    ogs_assert(recvmsg);
+    ogs_assert(sbi_request);
+
+    if (!recvmsg->h.resource.component[1]) {
+        ogs_error("No SUPI in URI");
+        return OGS_ERROR;
+    }
+
+    amf_ue = amf_ue_find_by_supi(recvmsg->h.resource.component[1]);
+    if (!amf_ue) {
+        ogs_error("Cannot find UE [%s]", recvmsg->h.resource.component[1]);
+        return OGS_ERROR;
+    }
+
+    if (!sbi_request->http.content || !sbi_request->http.content_length) {
+        ogs_error("[%s] No request body", amf_ue->supi);
+        return OGS_ERROR;
+    }
+
+    /* Parse N2InformationNotification JSON manually
+     * (not routed through ogs_sbi_message_t) */
+    item = cJSON_Parse(sbi_request->http.content);
+    if (!item) {
+        ogs_error("[%s] JSON parse failed", amf_ue->supi);
+        return OGS_ERROR;
+    }
+
+    N2InformationNotification =
+            OpenAPI_n2_information_notification_parseFromJSON(item);
+    cJSON_Delete(item);
+
+    if (!N2InformationNotification) {
+        ogs_error("[%s] N2InformationNotification parse failed", amf_ue->supi);
+        return OGS_ERROR;
+    }
+
+    if (N2InformationNotification->notify_reason !=
+            OpenAPI_n2_info_notify_reason_HANDOVER_COMPLETED) {
+        ogs_error("[%s] Unexpected notify_reason [%d]",
+                amf_ue->supi, N2InformationNotification->notify_reason);
+        OpenAPI_n2_information_notification_free(N2InformationNotification);
+        return OGS_ERROR;
+    }
+
+    OpenAPI_n2_information_notification_free(N2InformationNotification);
+
+    ogs_info("[%s] N2InfoNotify: HANDOVER_COMPLETED", amf_ue->supi);
+
+    /* Send UEContextReleaseCommand to source gNB */
+    ran_ue = ran_ue_find_by_id(amf_ue->ran_ue_id);
+    if (ran_ue) {
+        r = ngap_send_ran_ue_context_release_command(ran_ue,
+                NGAP_Cause_PR_radioNetwork,
+                NGAP_CauseRadioNetwork_successful_handover,
+                NGAP_UE_CTX_REL_NG_HANDOVER_COMPLETE,
+                ogs_local_conf()->time.handover.duration);
+        ogs_expect(r == OGS_OK);
+        ogs_assert(r != OGS_ERROR);
+    } else {
+        ogs_warn("[%s] No RAN UE context for source gNB", amf_ue->supi);
+    }
+
+    /* Release all PDU sessions at the source SMF(s) */
+    amf_sbi_send_release_all_sessions(
+            ran_ue, amf_ue, AMF_RELEASE_SM_CONTEXT_NO_STATE, NULL);
+
+    /* Clear inter-AMF handover state */
+    amf_ue->inter_amf_handover = false;
+
+    /* Respond 200 OK */
+    response = ogs_sbi_response_new();
+    ogs_assert(response);
+    response->status = OGS_SBI_HTTP_STATUS_OK;
+
+    ogs_assert(true == ogs_sbi_server_send_response(stream, response));
+
+    return OGS_OK;
 }

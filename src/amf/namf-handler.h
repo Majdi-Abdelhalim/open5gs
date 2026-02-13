@@ -46,6 +46,9 @@ int amf_namf_comm_handle_create_ue_context_request(
         ogs_sbi_stream_t *stream, ogs_sbi_message_t *recvmsg);
 int amf_namf_comm_handle_create_ue_context_response(
         ogs_sbi_message_t *recvmsg, amf_ue_t *amf_ue);
+int amf_namf_comm_handle_n2_info_notify(
+        ogs_sbi_stream_t *stream, ogs_sbi_message_t *recvmsg,
+        ogs_sbi_request_t *sbi_request);
 
 /* Encoding helpers (used by namf-build.c) */
 char *amf_namf_comm_base64_encode_5gmm_capability(amf_ue_t *amf_ue);
