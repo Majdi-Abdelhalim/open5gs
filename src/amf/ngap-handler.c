@@ -4156,6 +4156,42 @@ void ngap_handle_handover_cancel(
         return;
     }
 
+    /*
+     * Inter-AMF handover cancel: there is no target_ue on the source AMF
+     * (it was created on the visiting AMF via CreateUEContext).
+     * Send HandoverCancelAcknowledge immediately and clear the flag.
+     * The visiting AMF's UE context will be cleaned up by timeout.
+     */
+    {
+        amf_ue_t *amf_ue_check = amf_ue_find_by_id(source_ue->amf_ue_id);
+        if (amf_ue_check && amf_ue_check->inter_amf_handover) {
+            ogs_warn("[HandoverCancel] Inter-AMF for [%s]",
+                    amf_ue_check->supi);
+
+            if (!Cause) {
+                ogs_error("No Cause");
+                r = ngap_send_error_indication(
+                        gnb, &source_ue->ran_ue_ngap_id,
+                        &source_ue->amf_ue_ngap_id,
+                        NGAP_Cause_PR_protocol,
+                        NGAP_CauseProtocol_semantic_error);
+                ogs_expect(r == OGS_OK);
+                ogs_assert(r != OGS_ERROR);
+                return;
+            }
+
+            ogs_debug("    Cause[Group:%d Cause:%d]",
+                    Cause->present, (int)Cause->choice.radioNetwork);
+
+            r = ngap_send_handover_cancel_ack(source_ue);
+            ogs_expect(r == OGS_OK);
+            ogs_assert(r != OGS_ERROR);
+
+            amf_ue_check->inter_amf_handover = false;
+            return;
+        }
+    }
+
     target_ue = ran_ue_find_by_id(source_ue->target_ue_id);
     if (!target_ue) {
         ogs_error("Cannot find Source-UE Context [%lld]",

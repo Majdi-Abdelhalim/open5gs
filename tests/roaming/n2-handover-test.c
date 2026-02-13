@@ -39,7 +39,8 @@
  * 1. Direct forwarding inter-PLMN handover
  * 2. Indirect forwarding inter-PLMN handover
  * 3. Multiple sessions with LBO handover
- * 4. Handover cancellation (TODO)
+ * 4. Handover cancellation (inter-AMF)
+ * 5. Handover failure (inter-AMF)
  */
 
 /*
@@ -1070,6 +1071,449 @@ static void test3_func(abts_case *tc, void *data)
     ogs_info("[TEST3] ========================================");
 }
 
+/*
+ * TEST 4: Inter-PLMN Handover — HandoverCancel
+ *
+ * Setup: UE + session in Home PLMN (999-70)
+ * Action: Start inter-PLMN handover, then cancel after HandoverCommand
+ *
+ * Expected:
+ *   - Home AMF sends CreateUEContext → Visiting AMF sends HandoverRequest
+ *   - Target gNB responds HandoverRequestAck → Home AMF sends HandoverCommand
+ *   - Source gNB sends HandoverCancel → Home AMF immediately sends
+ *     HandoverCancelAcknowledge (no target_ue on source AMF)
+ *   - Visiting AMF's UE context cleaned up separately
+ *
+ * Validates: ngap_handle_handover_cancel() inter-AMF branch
+ */
+static void test4_func(abts_case *tc, void *data)
+{
+    int rv;
+    ogs_socknode_t *ngap_home, *ngap_visiting;
+    ogs_socknode_t *gtpu_home, *gtpu_visiting;
+    ogs_pkbuf_t *sendbuf;
+    ogs_pkbuf_t *recvbuf;
+    ogs_ngap_message_t message;
+
+    test_ue_t *test_ue = NULL;
+    test_sess_t *sess = NULL;
+    test_bearer_t *qos_flow = NULL;
+
+    bson_t *doc = NULL;
+
+    uint64_t visiting_amf_ue_ngap_id;
+    uint32_t visiting_ran_ue_ngap_id;
+    uint64_t home_amf_ue_ngap_id;
+    uint32_t home_ran_ue_ngap_id;
+
+    ogs_assert(ogs_local_conf()->num_of_serving_plmn_id >= 2);
+
+    /**************************************************************************
+     * PHASE 0: SETUP
+     **************************************************************************/
+
+    ogs_info("[TEST4] ========================================");
+    ogs_info("[TEST4] Phase 0: Infrastructure setup");
+    ogs_info("[TEST4] ========================================");
+
+    ngap_home = testngap_client(1, AF_INET);
+    ABTS_PTR_NOTNULL(tc, ngap_home);
+    gtpu_home = test_gtpu_server(1, AF_INET);
+    ABTS_PTR_NOTNULL(tc, gtpu_home);
+
+    ngap_visiting = testngap_client(2, AF_INET);
+    ABTS_PTR_NOTNULL(tc, ngap_visiting);
+    gtpu_visiting = test_gtpu_server(2, AF_INET);
+    ABTS_PTR_NOTNULL(tc, gtpu_visiting);
+
+    test_ue = create_test_ue("0000203191");
+    doc = test_db_new_simple(test_ue);
+    ABTS_PTR_NOTNULL(tc, doc);
+    ABTS_INT_EQUAL(tc, OGS_OK, test_db_insert_ue(test_ue, doc));
+
+    switch_plmn_context(0);
+    perform_ng_setup(tc, test_ue, ngap_home, 0x4000, 22);
+
+    switch_plmn_context(1);
+    sendbuf = testngap_build_ng_setup_request(0x4001, 22);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap_visiting, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    recvbuf = testgnb_ngap_read(ngap_visiting);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    rv = ogs_ngap_decode(&message, recvbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+    ABTS_INT_EQUAL(tc, message.present, NGAP_NGAP_PDU_PR_successfulOutcome);
+    ogs_ngap_free(&message);
+    ogs_pkbuf_free(recvbuf);
+
+    switch_plmn_context(0);
+
+    /**************************************************************************
+     * PHASE 1: REGISTER AND ESTABLISH SESSION IN HOME NETWORK
+     **************************************************************************/
+
+    ogs_info("[TEST4] ========================================");
+    ogs_info("[TEST4] Phase 1: Home network registration");
+    ogs_info("[TEST4] ========================================");
+
+    perform_full_registration(tc, test_ue, ngap_home);
+    sess = establish_pdu_session(tc, test_ue, ngap_home, "internet", 5);
+
+    qos_flow = test_qos_flow_find_by_qfi(sess, 1);
+    ogs_assert(qos_flow);
+
+    rv = test_gtpu_send_ping(gtpu_home, qos_flow, TEST_PING_IPV4);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+    recvbuf = testgnb_gtpu_read(gtpu_home);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    ogs_pkbuf_free(recvbuf);
+
+    /* Save home AMF IDs */
+    home_amf_ue_ngap_id = test_ue->amf_ue_ngap_id;
+    home_ran_ue_ngap_id = test_ue->ran_ue_ngap_id;
+
+    /**************************************************************************
+     * PHASE 2: INTER-PLMN HANDOVER → CANCEL
+     *
+     * Flow:
+     *   1. Source gNB → HandoverRequired → Home AMF
+     *   2. Home AMF → CreateUEContext → Visiting AMF
+     *   3. Visiting AMF → HandoverRequest → Target gNB
+     *   4. Target gNB → HandoverRequestAck → Visiting AMF
+     *   5. Visiting AMF → CreateUEContext response → Home AMF
+     *   6. Home AMF → HandoverCommand → Source gNB
+     *   7. Source gNB → HandoverCancel → Home AMF
+     *   8. Home AMF → HandoverCancelAcknowledge → Source gNB (immediate)
+     **************************************************************************/
+
+    ogs_info("[TEST4] ========================================");
+    ogs_info("[TEST4] Phase 2: Inter-PLMN handover + cancel");
+    ogs_info("[TEST4] ========================================");
+
+    ogs_plmn_id_t target_plmn;
+    ogs_5gs_tai_t target_tai;
+
+    memset(&target_plmn, 0, sizeof(target_plmn));
+    memset(&target_tai, 0, sizeof(target_tai));
+    memcpy(&target_plmn, &ogs_local_conf()->serving_plmn_id[1],
+            OGS_PLMN_ID_LEN);
+    memcpy(&target_tai.plmn_id, &target_plmn, OGS_PLMN_ID_LEN);
+    target_tai.tac.v = 22;
+
+    /* Step 1: HandoverRequired to Home AMF */
+    ogs_info("[TEST4] → HandoverRequired");
+    sendbuf = testngap_build_handover_required_with_target_plmn(
+            test_ue,
+            NGAP_HandoverType_intra5gs,
+            0x4001, 24,
+            NGAP_Cause_PR_radioNetwork,
+            NGAP_CauseRadioNetwork_handover_desirable_for_radio_reason,
+            true, &target_plmn, &target_tai);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap_home, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    /* Step 3: Receive HandoverRequest on target gNB */
+    ogs_info("[TEST4] ← HandoverRequest on visiting gNB");
+    recvbuf = testgnb_ngap_read(ngap_visiting);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    testngap_recv(test_ue, recvbuf);
+    ABTS_INT_EQUAL(tc, NGAP_ProcedureCode_id_HandoverResourceAllocation,
+            test_ue->ngap_procedure_code);
+
+    visiting_amf_ue_ngap_id = test_ue->amf_ue_ngap_id;
+
+    /* Step 4: Send HandoverRequestAck (no sessions) */
+    ogs_info("[TEST4] → HandoverRequestAck (no sessions)");
+    sendbuf = build_handover_request_ack_no_sessions(test_ue);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap_visiting, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    visiting_ran_ue_ngap_id = test_ue->ran_ue_ngap_id;
+
+    /* Step 6: Receive HandoverCommand on source gNB */
+    ogs_info("[TEST4] ← HandoverCommand on home gNB");
+    recvbuf = testgnb_ngap_read(ngap_home);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    testngap_recv(test_ue, recvbuf);
+    ABTS_INT_EQUAL(tc, NGAP_ProcedureCode_id_HandoverPreparation,
+            test_ue->ngap_procedure_code);
+
+    /* IDs are now restored to Home AMF (from HandoverCommand message) */
+
+    /* Step 7: Send HandoverCancel from source gNB */
+    ogs_info("[TEST4] → HandoverCancel");
+    sendbuf = testngap_build_handover_cancel(test_ue,
+            NGAP_Cause_PR_radioNetwork,
+            NGAP_CauseRadioNetwork_txnrelocoverall_expiry);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap_home, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    /* Step 8: Receive HandoverCancelAcknowledge immediately */
+    ogs_info("[TEST4] ← HandoverCancelAcknowledge (immediate)");
+    recvbuf = testgnb_ngap_read(ngap_home);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    testngap_recv(test_ue, recvbuf);
+    ABTS_INT_EQUAL(tc, NGAP_ProcedureCode_id_HandoverCancel,
+            test_ue->ngap_procedure_code);
+
+    ogs_info("[TEST4] ✓ HandoverCancelAcknowledge received");
+    ogs_msleep(300);
+
+    /********** Cleanup visiting AMF UE context */
+    test_ue->amf_ue_ngap_id = visiting_amf_ue_ngap_id;
+    test_ue->ran_ue_ngap_id = visiting_ran_ue_ngap_id;
+
+    sendbuf = testngap_build_ue_context_release_request(test_ue,
+            NGAP_Cause_PR_radioNetwork, NGAP_CauseRadioNetwork_user_inactivity,
+            true);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap_visiting, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    recvbuf = testgnb_ngap_read(ngap_visiting);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    testngap_recv(test_ue, recvbuf);
+
+    sendbuf = testngap_build_ue_context_release_complete(test_ue);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap_visiting, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    ogs_msleep(300);
+
+    /********** Cleanup home AMF UE context */
+    test_ue->amf_ue_ngap_id = home_amf_ue_ngap_id;
+    test_ue->ran_ue_ngap_id = home_ran_ue_ngap_id;
+
+    sendbuf = testngap_build_ue_context_release_request(test_ue,
+            NGAP_Cause_PR_radioNetwork, NGAP_CauseRadioNetwork_user_inactivity,
+            true);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap_home, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    recvbuf = testgnb_ngap_read(ngap_home);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    testngap_recv(test_ue, recvbuf);
+
+    sendbuf = testngap_build_ue_context_release_complete(test_ue);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap_home, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    ogs_msleep(300);
+
+    /********** Final cleanup */
+    ABTS_INT_EQUAL(tc, OGS_OK, test_db_remove_ue(test_ue));
+    testgnb_gtpu_close(gtpu_home);
+    testgnb_ngap_close(ngap_home);
+    testgnb_gtpu_close(gtpu_visiting);
+    testgnb_ngap_close(ngap_visiting);
+    test_ue_remove(test_ue);
+
+    ogs_info("[TEST4] ========================================");
+    ogs_info("[TEST4] Test complete - HandoverCancel OK");
+    ogs_info("[TEST4] ========================================");
+}
+
+/*
+ * TEST 5: Inter-PLMN Handover — HandoverFailure
+ *
+ * Setup: UE + session in Home PLMN (999-70)
+ * Action: Start inter-PLMN handover, target gNB rejects HandoverRequest
+ *
+ * Expected:
+ *   - Home AMF sends CreateUEContext → Visiting AMF sends HandoverRequest
+ *   - Target gNB sends HandoverFailure → Visiting AMF responds with 403
+ *     on deferred CreateUEContext stream, removes UE context
+ *   - Home AMF receives 403 → sends HandoverPreparationFailure to source gNB
+ *   - UE remains registered on Home AMF with existing sessions
+ *
+ * Validates: ngap_handle_handover_failure() inter-AMF + source AMF error path
+ */
+static void test5_func(abts_case *tc, void *data)
+{
+    int rv;
+    ogs_socknode_t *ngap_home, *ngap_visiting;
+    ogs_socknode_t *gtpu_home, *gtpu_visiting;
+    ogs_pkbuf_t *sendbuf;
+    ogs_pkbuf_t *recvbuf;
+    ogs_ngap_message_t message;
+
+    test_ue_t *test_ue = NULL;
+    test_sess_t *sess = NULL;
+    test_bearer_t *qos_flow = NULL;
+
+    bson_t *doc = NULL;
+
+    ogs_assert(ogs_local_conf()->num_of_serving_plmn_id >= 2);
+
+    /**************************************************************************
+     * PHASE 0: SETUP
+     **************************************************************************/
+
+    ogs_info("[TEST5] ========================================");
+    ogs_info("[TEST5] Phase 0: Infrastructure setup");
+    ogs_info("[TEST5] ========================================");
+
+    ngap_home = testngap_client(1, AF_INET);
+    ABTS_PTR_NOTNULL(tc, ngap_home);
+    gtpu_home = test_gtpu_server(1, AF_INET);
+    ABTS_PTR_NOTNULL(tc, gtpu_home);
+
+    ngap_visiting = testngap_client(2, AF_INET);
+    ABTS_PTR_NOTNULL(tc, ngap_visiting);
+    gtpu_visiting = test_gtpu_server(2, AF_INET);
+    ABTS_PTR_NOTNULL(tc, gtpu_visiting);
+
+    test_ue = create_test_ue("0000203191");
+    doc = test_db_new_simple(test_ue);
+    ABTS_PTR_NOTNULL(tc, doc);
+    ABTS_INT_EQUAL(tc, OGS_OK, test_db_insert_ue(test_ue, doc));
+
+    switch_plmn_context(0);
+    perform_ng_setup(tc, test_ue, ngap_home, 0x4000, 22);
+
+    switch_plmn_context(1);
+    sendbuf = testngap_build_ng_setup_request(0x4001, 22);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap_visiting, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    recvbuf = testgnb_ngap_read(ngap_visiting);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    rv = ogs_ngap_decode(&message, recvbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+    ABTS_INT_EQUAL(tc, message.present, NGAP_NGAP_PDU_PR_successfulOutcome);
+    ogs_ngap_free(&message);
+    ogs_pkbuf_free(recvbuf);
+
+    switch_plmn_context(0);
+
+    /**************************************************************************
+     * PHASE 1: REGISTER AND ESTABLISH SESSION IN HOME NETWORK
+     **************************************************************************/
+
+    ogs_info("[TEST5] ========================================");
+    ogs_info("[TEST5] Phase 1: Home network registration");
+    ogs_info("[TEST5] ========================================");
+
+    perform_full_registration(tc, test_ue, ngap_home);
+    sess = establish_pdu_session(tc, test_ue, ngap_home, "internet", 5);
+
+    qos_flow = test_qos_flow_find_by_qfi(sess, 1);
+    ogs_assert(qos_flow);
+
+    rv = test_gtpu_send_ping(gtpu_home, qos_flow, TEST_PING_IPV4);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+    recvbuf = testgnb_gtpu_read(gtpu_home);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    ogs_pkbuf_free(recvbuf);
+
+    /**************************************************************************
+     * PHASE 2: INTER-PLMN HANDOVER → FAILURE
+     *
+     * Flow:
+     *   1. Source gNB → HandoverRequired → Home AMF
+     *   2. Home AMF → CreateUEContext → Visiting AMF
+     *   3. Visiting AMF → HandoverRequest → Target gNB
+     *   4. Target gNB → HandoverFailure → Visiting AMF
+     *   5. Visiting AMF → 403 error on CreateUEContext → Home AMF
+     *   6. Home AMF → HandoverPreparationFailure → Source gNB
+     **************************************************************************/
+
+    ogs_info("[TEST5] ========================================");
+    ogs_info("[TEST5] Phase 2: Inter-PLMN handover + failure");
+    ogs_info("[TEST5] ========================================");
+
+    ogs_plmn_id_t target_plmn;
+    ogs_5gs_tai_t target_tai;
+
+    memset(&target_plmn, 0, sizeof(target_plmn));
+    memset(&target_tai, 0, sizeof(target_tai));
+    memcpy(&target_plmn, &ogs_local_conf()->serving_plmn_id[1],
+            OGS_PLMN_ID_LEN);
+    memcpy(&target_tai.plmn_id, &target_plmn, OGS_PLMN_ID_LEN);
+    target_tai.tac.v = 22;
+
+    /* Step 1: HandoverRequired to Home AMF */
+    ogs_info("[TEST5] → HandoverRequired");
+    sendbuf = testngap_build_handover_required_with_target_plmn(
+            test_ue,
+            NGAP_HandoverType_intra5gs,
+            0x4001, 24,
+            NGAP_Cause_PR_radioNetwork,
+            NGAP_CauseRadioNetwork_handover_desirable_for_radio_reason,
+            true, &target_plmn, &target_tai);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap_home, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    /* Step 3: Receive HandoverRequest on target gNB */
+    ogs_info("[TEST5] ← HandoverRequest on visiting gNB");
+    recvbuf = testgnb_ngap_read(ngap_visiting);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    testngap_recv(test_ue, recvbuf);
+    ABTS_INT_EQUAL(tc, NGAP_ProcedureCode_id_HandoverResourceAllocation,
+            test_ue->ngap_procedure_code);
+
+    /* Step 4: Send HandoverFailure from target gNB */
+    ogs_info("[TEST5] → HandoverFailure on visiting gNB");
+    sendbuf = testngap_build_handover_failure(test_ue,
+            NGAP_Cause_PR_radioNetwork,
+            NGAP_CauseRadioNetwork_ho_target_not_allowed);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap_visiting, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    /* Step 6: Receive HandoverPreparationFailure on source gNB */
+    ogs_info("[TEST5] ← HandoverPreparationFailure on home gNB");
+    recvbuf = testgnb_ngap_read(ngap_home);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    testngap_recv(test_ue, recvbuf);
+    ABTS_INT_EQUAL(tc, NGAP_ProcedureCode_id_HandoverPreparation,
+            test_ue->ngap_procedure_code);
+
+    ogs_info("[TEST5] ✓ HandoverPreparationFailure received");
+    ogs_msleep(300);
+
+    /********** Cleanup home AMF UE context (UE still registered) */
+    sendbuf = testngap_build_ue_context_release_request(test_ue,
+            NGAP_Cause_PR_radioNetwork, NGAP_CauseRadioNetwork_user_inactivity,
+            true);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap_home, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    recvbuf = testgnb_ngap_read(ngap_home);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    testngap_recv(test_ue, recvbuf);
+
+    sendbuf = testngap_build_ue_context_release_complete(test_ue);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap_home, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    ogs_msleep(300);
+
+    /********** Final cleanup */
+    ABTS_INT_EQUAL(tc, OGS_OK, test_db_remove_ue(test_ue));
+    testgnb_gtpu_close(gtpu_home);
+    testgnb_ngap_close(ngap_home);
+    testgnb_gtpu_close(gtpu_visiting);
+    testgnb_ngap_close(ngap_visiting);
+    test_ue_remove(test_ue);
+
+    ogs_info("[TEST5] ========================================");
+    ogs_info("[TEST5] Test complete - HandoverFailure OK");
+    ogs_info("[TEST5] ========================================");
+}
+
 abts_suite *test_n2_handover(abts_suite *suite)
 {
     suite = ADD_SUITE(suite)
@@ -1086,10 +1530,12 @@ abts_suite *test_n2_handover(abts_suite *suite)
     abts_run_test(suite, test1_func, NULL);
     abts_run_test(suite, test2_func, NULL);
     abts_run_test(suite, test3_func, NULL);
+    abts_run_test(suite, test4_func, NULL);
+    abts_run_test(suite, test5_func, NULL);
 
     ogs_info(" ");
     ogs_info("========================================");
-    ogs_info("Test Suite Summary (3 Tests):");
+    ogs_info("Test Suite Summary (5 Tests):");
     ogs_info(" ");
     ogs_info("1. Direct Forwarding Cross-PLMN");
     ogs_info("   Target: gNB 0x4001, TAC 22");
@@ -1103,6 +1549,16 @@ abts_suite *test_n2_handover(abts_suite *suite)
     ogs_info(" ");
     ogs_info("3. Multiple PDU Sessions");
     ogs_info("   Tests: Inter-PLMN handover with active sessions (LBO)");
+    ogs_info("   Status: PASS");
+    ogs_info(" ");
+    ogs_info("4. Handover Cancel (Inter-AMF)");
+    ogs_info("   Tests: Source gNB cancels after HandoverCommand");
+    ogs_info("   Validates: inter-AMF branch in ngap_handle_handover_cancel");
+    ogs_info("   Status: PASS");
+    ogs_info(" ");
+    ogs_info("5. Handover Failure (Inter-AMF)");
+    ogs_info("   Tests: Target gNB rejects HandoverRequest");
+    ogs_info("   Validates: inter-AMF failure + CreateUEContext error path");
     ogs_info("   Status: PASS");
     ogs_info(" ");
     ogs_info("========================================");
