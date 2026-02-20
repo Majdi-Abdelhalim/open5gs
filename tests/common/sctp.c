@@ -95,6 +95,7 @@ ogs_socknode_t *testngap_client(int index, int family)
 {
     int rv;
     ogs_sockaddr_t *addr = NULL;
+    ogs_sockaddr_t *bind_addr = NULL;
     ogs_socknode_t *node = NULL;
     ogs_sock_t *sock = NULL;
 
@@ -118,11 +119,31 @@ ogs_socknode_t *testngap_client(int index, int family)
 
     ogs_assert(addr);
 
+    /* Bind to distinct gNB source IPs so pcap shows separate gNBs */
+    if (index == 1) {
+        if (family == AF_INET6)
+            rv = ogs_getaddrinfo(&bind_addr,
+                    AF_UNSPEC, TEST_GNB1_IPV6, 0, 0);
+        else
+            rv = ogs_getaddrinfo(&bind_addr,
+                    AF_UNSPEC, TEST_GNB1_IPV4, 0, 0);
+    } else {
+        if (family == AF_INET6)
+            rv = ogs_getaddrinfo(&bind_addr,
+                    AF_UNSPEC, TEST_GNB2_IPV6, 0, 0);
+        else
+            rv = ogs_getaddrinfo(&bind_addr,
+                    AF_UNSPEC, TEST_GNB2_IPV4, 0, 0);
+    }
+    ogs_assert(rv == OGS_OK);
+
     node = ogs_socknode_new(addr);
     ogs_assert(node);
 
-    sock = ogs_sctp_client(SOCK_STREAM, node->addr, NULL, NULL);
+    sock = ogs_sctp_client(SOCK_STREAM, node->addr, bind_addr, NULL);
     ogs_assert(sock);
+
+    ogs_freeaddrinfo(bind_addr);
 
     node->sock = sock;
     node->cleanup = ogs_sctp_destroy;

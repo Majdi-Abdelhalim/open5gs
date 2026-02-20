@@ -33,6 +33,11 @@ extern "C" {
 #define TEST_AMF_IPV4           TEST_MME_IPV4
 #define TEST_GNB_IPV4           TEST_ENB_IPV4
 
+#define TEST_GNB1_IPV4          "127.0.0.2"
+#define TEST_GNB1_IPV6          "fd69:f21d:873c:fa::2"
+#define TEST_GNB2_IPV4          "127.0.0.3"
+#define TEST_GNB2_IPV6          "fd69:f21d:873c:fa::3"
+
 #define TEST_PING_IPV4          "10.45.0.1"
 #define TEST_PING_IPV6          "2001:db8:cafe::1"
 
