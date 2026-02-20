@@ -2112,10 +2112,6 @@ ogs_pkbuf_t *testngap_build_handover_request_ack(test_ue_t *test_ue)
     NGAP_TargetToSource_TransparentContainer_t
         *TargetToSource_TransparentContainer = NULL;
 
-    uint8_t tmp[OGS_HUGE_LEN];
-    char *_container =
-        "00010000";
-
     memset(&pdu, 0, sizeof (NGAP_NGAP_PDU_t));
     pdu.present = NGAP_NGAP_PDU_PR_successfulOutcome;
     pdu.choice.successfulOutcome = CALLOC(1, sizeof(NGAP_SuccessfulOutcome_t));
@@ -2201,13 +2197,30 @@ ogs_pkbuf_t *testngap_build_handover_request_ack(test_ue_t *test_ue)
     TargetToSource_TransparentContainer =
         &ie->value.choice.TargetToSource_TransparentContainer;
 
-    ogs_hex_from_string(_container, tmp, sizeof(tmp));
+    /* PER-encode a proper TargetNGRANNode-ToSourceNGRANNode-TransparentContainer
+     * so Wireshark can decode it (replaces dummy 4-byte hex) */
+    {
+        NGAP_TargetNGRANNode_ToSourceNGRANNode_TransparentContainer_t tc;
+        uint8_t rrc_data[] = { 0x20, 0x00, 0x08, 0x01, 0x00, 0x00, 0x00, 0x00 };
+        ogs_pkbuf_t *container_buf = NULL;
 
-    TargetToSource_TransparentContainer->size = 4;
-    TargetToSource_TransparentContainer->buf =
-        CALLOC(TargetToSource_TransparentContainer->size, sizeof(uint8_t));
-    memcpy(TargetToSource_TransparentContainer->buf,
-            tmp, TargetToSource_TransparentContainer->size);
+        memset(&tc, 0, sizeof(tc));
+        tc.rRCContainer.size = sizeof(rrc_data);
+        tc.rRCContainer.buf = CALLOC(sizeof(rrc_data), sizeof(uint8_t));
+        memcpy(tc.rRCContainer.buf, rrc_data, sizeof(rrc_data));
+
+        container_buf = ogs_asn_encode(
+            &asn_DEF_NGAP_TargetNGRANNode_ToSourceNGRANNode_TransparentContainer,
+            &tc);
+        ogs_assert(container_buf);
+
+        TargetToSource_TransparentContainer->size = container_buf->len;
+        TargetToSource_TransparentContainer->buf =
+            CALLOC(container_buf->len, sizeof(uint8_t));
+        memcpy(TargetToSource_TransparentContainer->buf,
+                container_buf->data, container_buf->len);
+        ogs_pkbuf_free(container_buf);
+    }
 
     return ogs_ngap_encode(&pdu);
 }
