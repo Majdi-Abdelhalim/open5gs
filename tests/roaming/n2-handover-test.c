@@ -19,6 +19,15 @@
 
 #include "test-common.h"
 
+/* Phase-level timing macros */
+#define TIMING_PHASE_START(t) do { (t) = ogs_get_monotonic_time(); } while (0)
+#define TIMING_PHASE_END(tag, name, t) \
+    ogs_info("[%s][TIMING] %s: %lld ms", tag, name, \
+            (long long)(ogs_get_monotonic_time() - (t)) / 1000)
+#define TIMING_TOTAL(tag, t) \
+    ogs_info("[%s][TIMING] Total: %lld ms", tag, \
+            (long long)(ogs_get_monotonic_time() - (t)) / 1000)
+
 /*
  * INTER-PLMN N2 HANDOVER TEST CASES
  * 
@@ -403,13 +412,18 @@ static void test1_func(abts_case *tc, void *data)
 
     bson_t *doc = NULL;
 
+    ogs_time_t t_total, t_phase;
+
     /* Verify config has both PLMNs for inter-PLMN test */
     ogs_assert(ogs_local_conf()->num_of_serving_plmn_id >= 2);
+
+    TIMING_PHASE_START(t_total);
 
     /**************************************************************************
      * PHASE 0: SETUP BOTH HOME AND VISITING NETWORK INFRASTRUCTURE
      **************************************************************************/
 
+    TIMING_PHASE_START(t_phase);
     ogs_info("[TEST1] ========================================");
     ogs_info("[TEST1] Phase 0: Infrastructure setup");
     ogs_info("[TEST1] ========================================");
@@ -463,10 +477,13 @@ static void test1_func(abts_case *tc, void *data)
     /* Switch back to home PLMN for UE registration */
     switch_plmn_context(0);
 
+    TIMING_PHASE_END("TEST1", "Phase 0 (setup)", t_phase);
+
     /**************************************************************************
      * PHASE 1: REGISTER AND ESTABLISH SESSION IN HOME NETWORK
      **************************************************************************/
 
+    TIMING_PHASE_START(t_phase);
     ogs_info("[TEST1] ========================================");
     ogs_info("[TEST1] Phase 1: Home network registration");
     ogs_info("[TEST1] ========================================");
@@ -490,6 +507,8 @@ static void test1_func(abts_case *tc, void *data)
 
     ogs_info("[TEST1] Phase 1 complete - UE registered with active PDU session");
 
+    TIMING_PHASE_END("TEST1", "Phase 1 (registration)", t_phase);
+
     /**************************************************************************
      * PHASE 2: INTER-PLMN N2 HANDOVER VIA N14 (Namf_Communication)
      *
@@ -508,6 +527,7 @@ static void test1_func(abts_case *tc, void *data)
      *   9. Home AMF → UEContextReleaseCommand → Source gNB
      **************************************************************************/
 
+    TIMING_PHASE_START(t_phase);
     ogs_info("[TEST1] ========================================");
     ogs_info("[TEST1] Phase 2: Inter-PLMN N2 handover via N14");
     ogs_info("[TEST1] ========================================");
@@ -601,6 +621,8 @@ static void test1_func(abts_case *tc, void *data)
 
     ogs_info("[TEST1] ✓ Inter-PLMN N2 handover completed successfully");
 
+    TIMING_PHASE_END("TEST1", "Phase 2 (handover)", t_phase);
+
     /********** Cleanup visiting AMF UE context */
     test_ue->amf_ue_ngap_id = visiting_amf_ue_ngap_id;
     test_ue->ran_ue_ngap_id = visiting_ran_ue_ngap_id;
@@ -634,6 +656,7 @@ static void test1_func(abts_case *tc, void *data)
     ogs_info("[TEST1] ========================================");
     ogs_info("[TEST1] Test complete - inter-PLMN N2 handover OK");
     ogs_info("[TEST1] ========================================");
+    TIMING_TOTAL("TEST1", t_total);
 }
 
 /*
@@ -661,8 +684,12 @@ static void test2_func(abts_case *tc, void *data)
 
     bson_t *doc = NULL;
 
+    ogs_time_t t_total, t_phase;
+
     ogs_assert(ogs_local_conf()->num_of_serving_plmn_id >= 2);
 
+    TIMING_PHASE_START(t_total);
+    TIMING_PHASE_START(t_phase);
     ogs_info("[TEST2] ========================================");
     ogs_info("[TEST2] Testing indirect forwarding inter-PLMN");
     ogs_info("[TEST2] ========================================");
@@ -714,6 +741,9 @@ static void test2_func(abts_case *tc, void *data)
     /* PDU Session Establishment */
     establish_pdu_session(tc, test_ue, ngap_home, "internet", 5);
 
+    TIMING_PHASE_END("TEST2", "Setup + Registration", t_phase);
+
+    TIMING_PHASE_START(t_phase);
     ogs_info("[TEST2] ========================================");
     ogs_info("[TEST2] Inter-PLMN handover with indirect forwarding");
     ogs_info("[TEST2] ========================================");
@@ -805,6 +835,8 @@ static void test2_func(abts_case *tc, void *data)
 
     ogs_info("[TEST2] ✓ Inter-PLMN N2 handover (indirect) completed");
 
+    TIMING_PHASE_END("TEST2", "Handover", t_phase);
+
     /* Cleanup visiting AMF UE context */
     test_ue->amf_ue_ngap_id = visiting_amf_ue_ngap_id;
     test_ue->ran_ue_ngap_id = visiting_ran_ue_ngap_id;
@@ -838,6 +870,7 @@ static void test2_func(abts_case *tc, void *data)
     ogs_info("[TEST2] ========================================");
     ogs_info("[TEST2] Test complete");
     ogs_info("[TEST2] ========================================");
+    TIMING_TOTAL("TEST2", t_total);
 }
 
 /*
@@ -870,8 +903,12 @@ static void test3_func(abts_case *tc, void *data)
     test_sess_t *sess = NULL;
     bson_t *doc = NULL;
 
+    ogs_time_t t_total, t_phase;
+
     ogs_assert(ogs_local_conf()->num_of_serving_plmn_id >= 2);
 
+    TIMING_PHASE_START(t_total);
+    TIMING_PHASE_START(t_phase);
     ogs_info("[TEST3] ========================================");
     ogs_info("[TEST3] Multiple PDU sessions inter-PLMN");
     ogs_info("[TEST3] ========================================");
@@ -976,6 +1013,9 @@ static void test3_func(abts_case *tc, void *data)
     memcpy(&target_tai.plmn_id, &target_plmn, OGS_PLMN_ID_LEN);
     target_tai.tac.v = 22;
 
+    TIMING_PHASE_END("TEST3", "Setup + Registration", t_phase);
+
+    TIMING_PHASE_START(t_phase);
     ogs_info("[TEST3] Inter-PLMN handover to PLMN 001-01");
 
     /* Send HandoverRequired to Home AMF */
@@ -1050,6 +1090,8 @@ static void test3_func(abts_case *tc, void *data)
 
     ogs_info("[TEST3] ✓ Inter-PLMN handover with sessions completed");
 
+    TIMING_PHASE_END("TEST3", "Handover", t_phase);
+
     /* Cleanup visiting AMF UE context */
     test_ue->amf_ue_ngap_id = visiting_amf_ue_ngap_id;
     test_ue->ran_ue_ngap_id = visiting_ran_ue_ngap_id;
@@ -1083,6 +1125,7 @@ static void test3_func(abts_case *tc, void *data)
     ogs_info("[TEST3] ========================================");
     ogs_info("[TEST3] Test complete");
     ogs_info("[TEST3] ========================================");
+    TIMING_TOTAL("TEST3", t_total);
 }
 
 /*
@@ -1120,12 +1163,17 @@ static void test4_func(abts_case *tc, void *data)
     uint64_t home_amf_ue_ngap_id;
     uint32_t home_ran_ue_ngap_id;
 
+    ogs_time_t t_total, t_phase;
+
     ogs_assert(ogs_local_conf()->num_of_serving_plmn_id >= 2);
+
+    TIMING_PHASE_START(t_total);
 
     /**************************************************************************
      * PHASE 0: SETUP
      **************************************************************************/
 
+    TIMING_PHASE_START(t_phase);
     ogs_info("[TEST4] ========================================");
     ogs_info("[TEST4] Phase 0: Infrastructure setup");
     ogs_info("[TEST4] ========================================");
@@ -1164,10 +1212,13 @@ static void test4_func(abts_case *tc, void *data)
 
     switch_plmn_context(0);
 
+    TIMING_PHASE_END("TEST4", "Phase 0 (setup)", t_phase);
+
     /**************************************************************************
      * PHASE 1: REGISTER AND ESTABLISH SESSION IN HOME NETWORK
      **************************************************************************/
 
+    TIMING_PHASE_START(t_phase);
     ogs_info("[TEST4] ========================================");
     ogs_info("[TEST4] Phase 1: Home network registration");
     ogs_info("[TEST4] ========================================");
@@ -1188,6 +1239,8 @@ static void test4_func(abts_case *tc, void *data)
     home_amf_ue_ngap_id = test_ue->amf_ue_ngap_id;
     home_ran_ue_ngap_id = test_ue->ran_ue_ngap_id;
 
+    TIMING_PHASE_END("TEST4", "Phase 1 (registration)", t_phase);
+
     /**************************************************************************
      * PHASE 2: INTER-PLMN HANDOVER → CANCEL
      *
@@ -1202,6 +1255,7 @@ static void test4_func(abts_case *tc, void *data)
      *   8. Home AMF → HandoverCancelAcknowledge → Source gNB (immediate)
      **************************************************************************/
 
+    TIMING_PHASE_START(t_phase);
     ogs_info("[TEST4] ========================================");
     ogs_info("[TEST4] Phase 2: Inter-PLMN handover + cancel");
     ogs_info("[TEST4] ========================================");
@@ -1276,6 +1330,8 @@ static void test4_func(abts_case *tc, void *data)
             test_ue->ngap_procedure_code);
 
     ogs_info("[TEST4] ✓ HandoverCancelAcknowledge received");
+
+    TIMING_PHASE_END("TEST4", "Phase 2 (handover+cancel)", t_phase);
     ogs_msleep(300);
 
     /********** Cleanup visiting AMF UE context */
@@ -1333,6 +1389,7 @@ static void test4_func(abts_case *tc, void *data)
     ogs_info("[TEST4] ========================================");
     ogs_info("[TEST4] Test complete - HandoverCancel OK");
     ogs_info("[TEST4] ========================================");
+    TIMING_TOTAL("TEST4", t_total);
 }
 
 /*
@@ -1365,12 +1422,17 @@ static void test5_func(abts_case *tc, void *data)
 
     bson_t *doc = NULL;
 
+    ogs_time_t t_total, t_phase;
+
     ogs_assert(ogs_local_conf()->num_of_serving_plmn_id >= 2);
+
+    TIMING_PHASE_START(t_total);
 
     /**************************************************************************
      * PHASE 0: SETUP
      **************************************************************************/
 
+    TIMING_PHASE_START(t_phase);
     ogs_info("[TEST5] ========================================");
     ogs_info("[TEST5] Phase 0: Infrastructure setup");
     ogs_info("[TEST5] ========================================");
@@ -1409,10 +1471,13 @@ static void test5_func(abts_case *tc, void *data)
 
     switch_plmn_context(0);
 
+    TIMING_PHASE_END("TEST5", "Phase 0 (setup)", t_phase);
+
     /**************************************************************************
      * PHASE 1: REGISTER AND ESTABLISH SESSION IN HOME NETWORK
      **************************************************************************/
 
+    TIMING_PHASE_START(t_phase);
     ogs_info("[TEST5] ========================================");
     ogs_info("[TEST5] Phase 1: Home network registration");
     ogs_info("[TEST5] ========================================");
@@ -1429,6 +1494,8 @@ static void test5_func(abts_case *tc, void *data)
     ABTS_PTR_NOTNULL(tc, recvbuf);
     ogs_pkbuf_free(recvbuf);
 
+    TIMING_PHASE_END("TEST5", "Phase 1 (registration)", t_phase);
+
     /**************************************************************************
      * PHASE 2: INTER-PLMN HANDOVER → FAILURE
      *
@@ -1441,6 +1508,7 @@ static void test5_func(abts_case *tc, void *data)
      *   6. Home AMF → HandoverPreparationFailure → Source gNB
      **************************************************************************/
 
+    TIMING_PHASE_START(t_phase);
     ogs_info("[TEST5] ========================================");
     ogs_info("[TEST5] Phase 2: Inter-PLMN handover + failure");
     ogs_info("[TEST5] ========================================");
@@ -1494,6 +1562,8 @@ static void test5_func(abts_case *tc, void *data)
             test_ue->ngap_procedure_code);
 
     ogs_info("[TEST5] ✓ HandoverPreparationFailure received");
+
+    TIMING_PHASE_END("TEST5", "Phase 2 (handover+failure)", t_phase);
     ogs_msleep(300);
 
     /********** Cleanup home AMF UE context (UE still registered) */
@@ -1526,6 +1596,7 @@ static void test5_func(abts_case *tc, void *data)
     ogs_info("[TEST5] ========================================");
     ogs_info("[TEST5] Test complete - HandoverFailure OK");
     ogs_info("[TEST5] ========================================");
+    TIMING_TOTAL("TEST5", t_total);
 }
 
 abts_suite *test_n2_handover(abts_suite *suite)
