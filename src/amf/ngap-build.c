@@ -2234,7 +2234,8 @@ ogs_pkbuf_t *ngap_build_handover_request(ran_ue_t *target_ue)
     ogs_debug("    Group[%d] Cause[%d]",
             Cause->present, (int)Cause->choice.radioNetwork);
 
-    if (HANDOVER_REQUEST_TRANSFER_NEEDED(amf_ue) == true &&
+    if ((HANDOVER_REQUEST_TRANSFER_NEEDED(amf_ue) == true ||
+            amf_ue->inter_amf_handover) &&
         amf_ue->ue_ambr.downlink && amf_ue->ue_ambr.uplink) {
 
         ie = CALLOC(1, sizeof(NGAP_HandoverRequestIEs_t));
