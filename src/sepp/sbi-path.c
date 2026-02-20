@@ -168,11 +168,10 @@ static int request_handler(ogs_sbi_request_t *request, void *data)
 
     struct {
         char *target_apiroot;
-        char *target_plmn;
         char *callback;
         char *nrf_uri;
     } headers = {
-        NULL, NULL, NULL, NULL
+        NULL, NULL, NULL
     };
 
     sepp_event_t *e = NULL;
@@ -211,8 +210,6 @@ static int request_handler(ogs_sbi_request_t *request, void *data)
          */
         if (!strcasecmp(key, OGS_SBI_CUSTOM_TARGET_APIROOT)) {
             headers.target_apiroot = val;
-        } else if (!strcasecmp(key, OGS_SBI_CUSTOM_TARGET_PLMN)) {
-            headers.target_plmn = val;
         }
     }
 
@@ -261,57 +258,6 @@ static int request_handler(ogs_sbi_request_t *request, void *data)
                 if (!client) {
                     ogs_error("No Client in SEPP Peer Node [%s:%d:%d]",
                             headers.target_apiroot, mcc, mnc);
-                    sepp_assoc_remove(assoc);
-                    return OGS_ERROR;
-                }
-            }
-
-            /* Client ApiRoot */
-            apiroot = ogs_sbi_client_apiroot(client);
-            ogs_assert(apiroot);
-
-        } else if (headers.target_plmn) {
-            /*
-             * IP-based VPLMN detection fallback:
-             * SCP passes X-Open5gs-Target-Plmn when FQDN check fails
-             * but NF instance PLMN indicates a different PLMN.
-             * Parse MCC-MNC from the header and find the peer SEPP.
-             */
-            uint16_t mcc = 0, mnc = 0;
-
-            if (server->interface) {
-                ogs_error("[DROP] Peer SEPP is using "
-                        "the wrong interface[%s]", server->interface);
-                sepp_assoc_remove(assoc);
-                return OGS_ERROR;
-            }
-
-            if (sscanf(headers.target_plmn, "%hu-%hu", &mcc, &mnc) != 2 ||
-                    !mcc || !mnc) {
-                ogs_error("Invalid X-Open5gs-Target-Plmn [%s]",
-                        headers.target_plmn);
-                sepp_assoc_remove(assoc);
-                return OGS_ERROR;
-            }
-
-            /*
-             * Different PLMN (IP-based) : FROM c-SEPP TO p-SEPP
-             */
-            sepp_node = sepp_node_find_by_plmn_id(mcc, mnc);
-            if (!sepp_node) {
-                ogs_error("Cannot find SEPP Peer Node "
-                        "[target_plmn:%s, apiroot:%s]",
-                        headers.target_plmn, headers.target_apiroot);
-                sepp_assoc_remove(assoc);
-                return OGS_ERROR;
-            }
-
-            client = NF_INSTANCE_CLIENT(&sepp_node->n32f);
-            if (!client) {
-                client = NF_INSTANCE_CLIENT(sepp_node);
-                if (!client) {
-                    ogs_error("No Client in SEPP Peer Node "
-                            "[target_plmn:%s]", headers.target_plmn);
                     sepp_assoc_remove(assoc);
                     return OGS_ERROR;
                 }
@@ -561,8 +507,6 @@ static void copy_request(
         } else if (do_not_remove_custom_header == false &&
             !strncasecmp(key, OGS_SBI_CUSTOM_DISCOVERY_COMMON,
                 strlen(OGS_SBI_CUSTOM_DISCOVERY_COMMON))) {
-        } else if (!strcasecmp(key, OGS_SBI_CUSTOM_TARGET_PLMN)) {
-            /* Always strip: internal SCP->SEPP header, not for peer SEPP */
         } else if (!strcasecmp(key, OGS_SBI_SCHEME)) {
         } else if (!strcasecmp(key, OGS_SBI_AUTHORITY)) {
         } else {

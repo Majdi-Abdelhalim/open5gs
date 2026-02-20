@@ -104,73 +104,6 @@ void scp_sbi_close(void)
     ogs_sbi_server_stop_all();
 }
 
-/*
- * Check if an NF instance belongs to a visited PLMN by comparing its
- * registered PLMN IDs against the locally-configured serving PLMNs.
- * Returns true if the NF is NOT in any serving PLMN (i.e., it's in VPLMN).
- * Falls back to false if the NF instance has no PLMN info.
- */
-static bool scp_nf_instance_in_vplmn(ogs_sbi_nf_instance_t *nf_instance)
-{
-    int i, j;
-
-    if (!nf_instance || nf_instance->num_of_plmn_id == 0)
-        return false;
-
-    if (ogs_local_conf()->num_of_serving_plmn_id == 0)
-        return false;
-
-    for (i = 0; i < nf_instance->num_of_plmn_id; i++) {
-        for (j = 0; j < ogs_local_conf()->num_of_serving_plmn_id; j++) {
-            if (memcmp(&nf_instance->plmn_id[i],
-                    &ogs_local_conf()->serving_plmn_id[j],
-                    OGS_PLMN_ID_LEN) == 0) {
-                return false; /* Matches a serving PLMN - home network */
-            }
-        }
-    }
-    return true; /* No serving PLMN match - VPLMN */
-}
-
-/*
- * Find an NF instance by matching its associated client against
- * the address parsed from a target apiroot URI.
- * Used when FQDN-based VPLMN detection fails (IP-based NF profiles).
- */
-static ogs_sbi_nf_instance_t *scp_nf_instance_find_by_apiroot(
-        char *target_apiroot)
-{
-    bool rc;
-    OpenAPI_uri_scheme_e scheme = OpenAPI_uri_scheme_NULL;
-    char *fqdn = NULL;
-    uint16_t fqdn_port = 0;
-    ogs_sockaddr_t *addr = NULL, *addr6 = NULL;
-    ogs_sbi_client_t *client = NULL;
-    ogs_sbi_nf_instance_t *nf_instance = NULL;
-    ogs_sbi_nf_instance_t *found = NULL;
-
-    ogs_assert(target_apiroot);
-
-    rc = ogs_sbi_getaddr_from_uri(
-            &scheme, &fqdn, &fqdn_port, &addr, &addr6, target_apiroot);
-    if (!rc) return NULL;
-
-    client = ogs_sbi_client_find(scheme, fqdn, fqdn_port, addr, addr6);
-    if (client) {
-        ogs_list_for_each(&ogs_sbi_self()->nf_instance_list, nf_instance) {
-            if (NF_INSTANCE_CLIENT(nf_instance) == client) {
-                found = nf_instance;
-                break;
-            }
-        }
-    }
-
-    ogs_free(fqdn);
-    ogs_freeaddrinfo(addr);
-    ogs_freeaddrinfo(addr6);
-    return found;
-}
-
 static int request_handler(ogs_sbi_request_t *request, void *data)
 {
     int rv;
@@ -450,32 +383,6 @@ static int request_handler(ogs_sbi_request_t *request, void *data)
             ogs_assert(!assoc->target_apiroot);
             assoc->target_apiroot = ogs_sbi_client_apiroot(client);
             ogs_assert(assoc->target_apiroot);
-        }
-
-        /*
-         * IP-based VPLMN detection: when FQDN checks fail (IP-based NF
-         * profiles), look up NF instance by apiroot and check its PLMN
-         * against serving PLMNs. This handles the case where NRF returns
-         * IP addresses instead of FQDNs for inter-PLMN NFs.
-         */
-        if (!assoc->target_apiroot && headers.target_apiroot) {
-            ogs_sbi_nf_instance_t *target_nf = NULL;
-
-            target_nf = scp_nf_instance_find_by_apiroot(
-                    headers.target_apiroot);
-            if (target_nf && scp_nf_instance_in_vplmn(target_nf)) {
-                ogs_assert(!assoc->target_apiroot);
-                assoc->target_apiroot =
-                    ogs_strdup(headers.target_apiroot);
-                ogs_assert(assoc->target_apiroot);
-
-                /* Store target PLMN for SEPP routing (IP-based fallback) */
-                if (target_nf->num_of_plmn_id > 0) {
-                    memcpy(&assoc->target_plmn,
-                            &target_nf->plmn_id[0], OGS_PLMN_ID_LEN);
-                    assoc->target_plmn_presence = true;
-                }
-            }
         }
 
         if (assoc->target_apiroot) {
@@ -931,33 +838,6 @@ static int nf_discover_handler(
         ogs_assert(assoc->target_apiroot);
 
         client = sepp_client;
-
-    } else if (scp_nf_instance_in_vplmn(nf_instance)) {
-        /*
-         * IP-based VPLMN detection: when FQDN check fails (IP-based NF
-         * profiles), check the discovered NF instance's PLMN against
-         * serving PLMNs. Route through SEPP if the NF is in a VPLMN.
-         */
-        sepp_client = NF_INSTANCE_CLIENT(ogs_sbi_self()->sepp_instance);
-        if (!sepp_client) {
-            strerror = ogs_msprintf(
-                    "(NF discover) No SEPP for VPLMN NF instance");
-            res_status = OGS_SBI_HTTP_STATUS_BAD_REQUEST;
-            goto cleanup;
-        }
-
-        ogs_assert(!assoc->target_apiroot);
-        assoc->target_apiroot = ogs_sbi_client_apiroot(client);
-        ogs_assert(assoc->target_apiroot);
-
-        /* Store target PLMN for SEPP routing (IP-based fallback) */
-        if (nf_instance->num_of_plmn_id > 0) {
-            memcpy(&assoc->target_plmn,
-                    &nf_instance->plmn_id[0], OGS_PLMN_ID_LEN);
-            assoc->target_plmn_presence = true;
-        }
-
-        client = sepp_client;
     }
 
     if (false == send_request(
@@ -1149,16 +1029,6 @@ static bool send_request(
     if (assoc->target_apiroot)
         ogs_sbi_header_set(scp_request.http.headers,
                 OGS_SBI_CUSTOM_TARGET_APIROOT, assoc->target_apiroot);
-
-    /* Added Custom Header(Target-Plmn) for IP-based SEPP routing */
-    if (assoc->target_plmn_presence) {
-        char plmn_str[16];
-        ogs_snprintf(plmn_str, sizeof(plmn_str), "%d-%d",
-                ogs_plmn_id_mcc(&assoc->target_plmn),
-                ogs_plmn_id_mnc(&assoc->target_plmn));
-        ogs_sbi_header_set(scp_request.http.headers,
-                OGS_SBI_CUSTOM_TARGET_PLMN, plmn_str);
-    }
 
     /* Client ApiRoot */
     uri_apiroot = ogs_sbi_client_apiroot(client);
