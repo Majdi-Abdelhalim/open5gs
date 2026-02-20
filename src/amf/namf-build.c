@@ -125,6 +125,7 @@ ogs_sbi_request_t *amf_namf_comm_build_create_ue_context(
     OpenAPI_list_t *MmContextList = NULL;
     char *encoded_gmm_capability = NULL;
     char hxkamf_string[OGS_KEYSTRLEN(OGS_SHA256_DIGEST_SIZE)];
+    char hxnh_string[OGS_KEYSTRLEN(OGS_SHA256_DIGEST_SIZE)];
 
     OpenAPI_ng_ran_target_id_t *targetId = NULL;
     NGAP_TargetID_t *TargetID = NULL;
@@ -177,6 +178,14 @@ ogs_sbi_request_t *amf_namf_comm_build_create_ue_context(
             hxkamf_string, sizeof(hxkamf_string));
     Key_amf.key_val = hxkamf_string;
     SeafData.key_amf = &Key_amf;
+
+    /* NH and NCC for handover security context (TS 33.501) */
+    ogs_hex_to_ascii(amf_ue->nh, sizeof(amf_ue->nh),
+            hxnh_string, sizeof(hxnh_string));
+    SeafData.nh = hxnh_string;
+    SeafData.is_ncc = true;
+    SeafData.ncc = amf_ue->nhcc;
+
     UeContext.seaf_data = &SeafData;
 
     /* UE AMBR */

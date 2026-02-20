@@ -2134,6 +2134,17 @@ int amf_namf_comm_handle_create_ue_context_request(
                     strlen(UeContext->seaf_data->key_amf->key_val),
                     amf_ue->kamf, sizeof(amf_ue->kamf));
         }
+
+        /* NH and NCC from source AMF (TS 33.501) */
+        if (UeContext->seaf_data->nh) {
+            ogs_ascii_to_hex(
+                    UeContext->seaf_data->nh,
+                    strlen(UeContext->seaf_data->nh),
+                    amf_ue->nh, sizeof(amf_ue->nh));
+        }
+        if (UeContext->seaf_data->is_ncc) {
+            amf_ue->nhcc = (uint8_t)UeContext->seaf_data->ncc;
+        }
     }
 
     /* Set MmContext: NAS security, UE security capability, allowed NSSAI */
