@@ -58,6 +58,9 @@ typedef struct scp_assoc_s {
     ogs_sbi_nf_instance_t *nf_service_producer;
 
     char *target_apiroot;
+
+    ogs_plmn_id_t target_plmn;
+    bool target_plmn_presence;
 } scp_assoc_t;
 
 void scp_context_init(void);

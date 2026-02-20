@@ -144,8 +144,9 @@ smf:
 amf:
   sbi:
     server:
-      - address: 127.0.2.5
-        port: 7777
+#      - address: 127.0.2.5
+#        port: 7777
+      - address: amf.5gc.mnc001.mcc001.3gppnetwork.org
     client:
       scp:
         - uri: http://127.0.2.200:7777
@@ -342,8 +343,9 @@ udm:
 pcf:
   sbi:
     server:
-      - address: 127.0.2.13
-        port: 7777
+#      - address: 127.0.2.13
+#        port: 7777
+      - address: pcf.5gc.mnc001.mcc001.3gppnetwork.org
     client:
       scp:
         - uri: http://127.0.2.200:7777
@@ -446,8 +448,9 @@ nssf:
 bsf:
   sbi:
     server:
-      - address: 127.0.2.15
-        port: 7777
+#      - address: 127.0.2.15
+#        port: 7777
+      - address: bsf.5gc.mnc001.mcc001.3gppnetwork.org
     client:
       scp:
         - uri: http://127.0.2.200:7777
@@ -455,8 +458,9 @@ bsf:
 udr:
   sbi:
     server:
-      - address: 127.0.2.20
-        port: 7777
+#      - address: 127.0.2.20
+#        port: 7777
+      - address: udr.5gc.mnc001.mcc001.3gppnetwork.org
     client:
       scp:
         - uri: http://127.0.2.200:7777

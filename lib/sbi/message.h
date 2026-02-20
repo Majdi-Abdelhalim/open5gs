@@ -282,6 +282,8 @@ extern "C" {
     OGS_SBI_CUSTOM_3GPP_COMMON "Callback"
 #define OGS_SBI_CUSTOM_TARGET_APIROOT    \
     OGS_SBI_CUSTOM_3GPP_COMMON "Target-apiRoot"
+#define OGS_SBI_CUSTOM_TARGET_PLMN       \
+    "X-Open5gs-Target-Plmn"
 #define OGS_SBI_CUSTOM_ROUTING_BINDING   \
     OGS_SBI_CUSTOM_3GPP_COMMON "Routing-Binding"
 #define OGS_SBI_CUSTOM_BINDING           \
