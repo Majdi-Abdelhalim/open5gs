@@ -1612,10 +1612,10 @@ abts_suite *test_n2_handover(abts_suite *suite)
     ogs_info("  - N14 (Namf_Communication) between AMFs via SEPP");
     ogs_info(" ");
 
-//     abts_run_test(suite, test1_func, NULL);
-//     abts_run_test(suite, test2_func, NULL);
-//     abts_run_test(suite, test3_func, NULL);
-//     abts_run_test(suite, test4_func, NULL);
+    abts_run_test(suite, test1_func, NULL);
+    abts_run_test(suite, test2_func, NULL);
+    abts_run_test(suite, test3_func, NULL);
+    abts_run_test(suite, test4_func, NULL);
     abts_run_test(suite, test5_func, NULL);
 
     ogs_info(" ");
