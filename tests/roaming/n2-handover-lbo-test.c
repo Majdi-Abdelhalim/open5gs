@@ -117,6 +117,9 @@ static test_ue_t *create_test_ue(const char *imsi)
     test_ue->k_string = "465b5ce8b199b49faa5f0a2ee238a6bc";
     test_ue->opc_string = "e8ed289deba952e4283b54e88e6183ca";
 
+    /* LBO test: subscriber uses local breakout roaming */
+    test_ue->lbo_roaming_allowed = true;
+
     return test_ue;
 }
 
@@ -1599,12 +1602,12 @@ static void test5_func(abts_case *tc, void *data)
     TIMING_TOTAL("TEST5", t_total);
 }
 
-abts_suite *test_n2_handover(abts_suite *suite)
+abts_suite *test_n2_handover_lbo(abts_suite *suite)
 {
     suite = ADD_SUITE(suite)
 
     ogs_info("========================================");
-    ogs_info("Inter-PLMN N2 Handover Test Suite");
+    ogs_info("Inter-PLMN N2 Handover LBO Test Suite");
     ogs_info("========================================");
     ogs_info("Architecture Under Test:");
     ogs_info("  - Home AMF (999-70): 127.0.1.5");
