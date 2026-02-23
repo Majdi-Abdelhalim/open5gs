@@ -360,6 +360,50 @@ int amf_nsmf_pdusession_handle_update_sm_context(
 
                         AMF_UE_CLEAR_N2_TRANSFER(amf_ue, handover_request);
                     }
+                } else if (state ==
+                    AMF_UPDATE_SM_CONTEXT_INTER_PLMN_HANDOVER_REQUIRED) {
+                    /*
+                     * Inter-PLMN home-routed handover:
+                     * Store N2 SM info from V-SMF/H-SMF, then once all HR
+                     * sessions respond, send CreateUEContext to target AMF
+                     * with the collected PDU session information.
+                     */
+                    AMF_SESS_STORE_N2_TRANSFER(
+                            sess, handover_request, ogs_pkbuf_copy(n2smbuf));
+
+                    if (AMF_SESSION_SYNC_DONE(amf_ue,
+                        AMF_UPDATE_SM_CONTEXT_INTER_PLMN_HANDOVER_REQUIRED)) {
+                        ogs_sbi_discovery_option_t *discovery_option = NULL;
+
+                        ogs_info("[%s] Inter-PLMN HR: all sessions ready, "
+                                "sending CreateUEContext", amf_ue->supi);
+
+                        /* Build discovery option from stored target info */
+                        discovery_option = ogs_sbi_discovery_option_new();
+                        ogs_assert(discovery_option);
+
+                        ogs_sbi_discovery_option_add_target_plmn_list(
+                                discovery_option,
+                                &amf_ue->inter_plmn_target_plmn_id);
+                        ogs_sbi_discovery_option_set_tai(
+                                discovery_option,
+                                &amf_ue->inter_plmn_target_tai);
+
+                        /* Send CreateUEContext with deep-copied TargetID.
+                         * Builder runs synchronously and reads
+                         * sess->transfer.handover_request for each session. */
+                        r = amf_ue_sbi_discover_and_send(
+                                OGS_SBI_SERVICE_TYPE_NAMF_COMM,
+                                discovery_option,
+                                amf_namf_comm_build_create_ue_context,
+                                amf_ue,
+                                AMF_NAMF_COMM_CREATE_UE_CONTEXT,
+                                amf_ue->inter_plmn_target_id);
+                        ogs_expect(r == OGS_OK);
+                        ogs_assert(r != OGS_ERROR);
+
+                        AMF_UE_CLEAR_N2_TRANSFER(amf_ue, handover_request);
+                    }
                 } else {
                     ogs_error("Invalid STATE[%d]", state);
                     ogs_assert_if_reached();
@@ -720,6 +764,12 @@ int amf_nsmf_pdusession_handle_update_sm_context(
                 ogs_assert_if_reached();
 
             } else if (state == AMF_UPDATE_SM_CONTEXT_HANDOVER_REQUIRED) {
+
+                /* Not reached here */
+                ogs_assert_if_reached();
+
+            } else if (state ==
+                    AMF_UPDATE_SM_CONTEXT_INTER_PLMN_HANDOVER_REQUIRED) {
 
                 /* Not reached here */
                 ogs_assert_if_reached();

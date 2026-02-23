@@ -3370,7 +3370,148 @@ void ngap_handle_handover_required(
             ogs_ngap_ASN_to_5gs_tai(
                     &targetRANNodeID->selectedTAI, &target_tai);
 
-            /* Build discovery option for target AMF in target PLMN */
+            /* Store target PLMN and TAI for deferred CreateUEContext */
+            memcpy(&amf_ue->inter_plmn_target_plmn_id,
+                    &target_plmn_id, sizeof(ogs_plmn_id_t));
+            memcpy(&amf_ue->inter_plmn_target_tai,
+                    &target_tai, sizeof(ogs_5gs_tai_t));
+
+            /* Deep-copy TargetID for deferred CreateUEContext builder */
+            if (amf_ue->inter_plmn_target_id) {
+                ogs_asn_free(&asn_DEF_NGAP_TargetID,
+                        amf_ue->inter_plmn_target_id);
+                ogs_free(amf_ue->inter_plmn_target_id);
+            }
+            amf_ue->inter_plmn_target_id =
+                    ogs_calloc(1, sizeof(NGAP_TargetID_t));
+            ogs_assert(amf_ue->inter_plmn_target_id);
+            r = ogs_asn_copy_ie(&asn_DEF_NGAP_TargetID,
+                    TargetID, amf_ue->inter_plmn_target_id);
+            if (r != OGS_OK) {
+                ogs_error("Failed to copy TargetID");
+                ogs_free(amf_ue->inter_plmn_target_id);
+                amf_ue->inter_plmn_target_id = NULL;
+                r = ngap_send_error_indication2(source_ue,
+                        NGAP_Cause_PR_protocol,
+                        NGAP_CauseProtocol_transfer_syntax_error);
+                ogs_expect(r == OGS_OK);
+                ogs_assert(r != OGS_ERROR);
+                return;
+            }
+
+            /*
+             * Check for home-routed sessions needing V-SMF involvement.
+             * For HR sessions, we must send UpdateSMContext(HANDOVER_REQUIRED)
+             * to the V-SMF before sending CreateUEContext to target AMF,
+             * so the H-SMF can prepare N2 SM information.
+             */
+            {
+                bool has_hr_sessions = false;
+
+                for (i = 0; i < PDUSessionList->list.count; i++) {
+                    amf_sess_t *sess = NULL;
+                    PDUSessionItem =
+                        (NGAP_PDUSessionResourceItemHORqd_t *)
+                            PDUSessionList->list.array[i];
+                    if (!PDUSessionItem) continue;
+
+                    sess = amf_sess_find_by_psi(
+                            amf_ue, PDUSessionItem->pDUSessionID);
+                    if (sess && !sess->lbo_roaming_allowed &&
+                            SESSION_CONTEXT_IN_SMF(sess)) {
+                        has_hr_sessions = true;
+                        break;
+                    }
+                }
+
+                if (has_hr_sessions) {
+                    ogs_info("Inter-PLMN HR: sending UpdateSMContext "
+                            "for home-routed sessions before CreateUEContext");
+
+                    for (i = 0; i < PDUSessionList->list.count; i++) {
+                        amf_sess_t *sess = NULL;
+                        PDUSessionItem =
+                            (NGAP_PDUSessionResourceItemHORqd_t *)
+                                PDUSessionList->list.array[i];
+
+                        if (!PDUSessionItem) {
+                            ogs_error("No PDUSessionResourceItemHORqd");
+                            r = ngap_send_error_indication2(source_ue,
+                                    NGAP_Cause_PR_protocol,
+                                    NGAP_CauseProtocol_semantic_error);
+                            ogs_expect(r == OGS_OK);
+                            ogs_assert(r != OGS_ERROR);
+                            return;
+                        }
+
+                        transfer =
+                            &PDUSessionItem->handoverRequiredTransfer;
+                        if (!transfer) {
+                            ogs_error("No handoverRequiredTransfer");
+                            r = ngap_send_error_indication2(source_ue,
+                                    NGAP_Cause_PR_protocol,
+                                    NGAP_CauseProtocol_semantic_error);
+                            ogs_expect(r == OGS_OK);
+                            ogs_assert(r != OGS_ERROR);
+                            return;
+                        }
+
+                        if (PDUSessionItem->pDUSessionID ==
+                                OGS_NAS_PDU_SESSION_IDENTITY_UNASSIGNED) {
+                            ogs_error("PDU Session Identity is unassigned");
+                            r = ngap_send_error_indication2(source_ue,
+                                    NGAP_Cause_PR_protocol,
+                                    NGAP_CauseProtocol_semantic_error);
+                            ogs_expect(r == OGS_OK);
+                            ogs_assert(r != OGS_ERROR);
+                            return;
+                        }
+
+                        sess = amf_sess_find_by_psi(
+                                amf_ue, PDUSessionItem->pDUSessionID);
+                        if (!sess) {
+                            ogs_error("Cannot find PDU Session ID [%d]",
+                                    (int)PDUSessionItem->pDUSessionID);
+                            r = ngap_send_error_indication2(source_ue,
+                                    NGAP_Cause_PR_radioNetwork,
+                                    NGAP_CauseRadioNetwork_unknown_PDU_session_ID);
+                            ogs_expect(r == OGS_OK);
+                            ogs_assert(r != OGS_ERROR);
+                            return;
+                        }
+
+                        /* Only send UpdateSMContext for HR sessions */
+                        if (!sess->lbo_roaming_allowed &&
+                                SESSION_CONTEXT_IN_SMF(sess)) {
+                            memset(&param, 0, sizeof(param));
+                            param.n2smbuf =
+                                ogs_pkbuf_alloc(NULL, OGS_MAX_SDU_LEN);
+                            ogs_assert(param.n2smbuf);
+                            param.n2SmInfoType =
+                                OpenAPI_n2_sm_info_type_HANDOVER_REQUIRED;
+                            ogs_pkbuf_put_data(param.n2smbuf,
+                                    transfer->buf, transfer->size);
+                            param.hoState = OpenAPI_ho_state_PREPARING;
+                            param.TargetID = TargetID;
+
+                            r = amf_sess_sbi_discover_and_send(
+                                OGS_SBI_SERVICE_TYPE_NSMF_PDUSESSION,
+                                NULL,
+                                amf_nsmf_pdusession_build_update_sm_context,
+                                source_ue, sess,
+                                AMF_UPDATE_SM_CONTEXT_INTER_PLMN_HANDOVER_REQUIRED,
+                                &param);
+                            ogs_expect(r == OGS_OK);
+                            ogs_assert(r != OGS_ERROR);
+
+                            ogs_pkbuf_free(param.n2smbuf);
+                        }
+                    }
+                    return;
+                }
+            }
+
+            /* No HR sessions — send CreateUEContext immediately (LBO) */
             discovery_option = ogs_sbi_discovery_option_new();
             ogs_assert(discovery_option);
 

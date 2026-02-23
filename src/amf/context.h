@@ -629,6 +629,11 @@ struct amf_ue_s {
     char *n2_notify_uri;
     ogs_pool_id_t create_ue_context_stream_id;
 
+    /* Inter-PLMN Handover: stored TargetID for deferred CreateUEContext */
+    NGAP_TargetID_t *inter_plmn_target_id;
+    ogs_plmn_id_t inter_plmn_target_plmn_id;
+    ogs_5gs_tai_t inter_plmn_target_tai;
+
     /* SubscriptionId of Subscription to Data Change Notification to UDM */
 #define UDM_SDM_SUBSCRIBED(__aMF) \
     ((__aMF) && ((__aMF)->data_change_subscription.id))

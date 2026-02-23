@@ -1771,6 +1771,14 @@ void amf_ue_remove(amf_ue_t *amf_ue)
     amf_ue->inter_amf_handover = false;
     amf_ue->create_ue_context_stream_id = OGS_INVALID_POOL_ID;
 
+    /* Clear Inter-PLMN Handover TargetID */
+    if (amf_ue->inter_plmn_target_id) {
+        ogs_asn_free(
+                &asn_DEF_NGAP_TargetID, amf_ue->inter_plmn_target_id);
+        ogs_free(amf_ue->inter_plmn_target_id);
+        amf_ue->inter_plmn_target_id = NULL;
+    }
+
     /* Delete All Timers */
     CLEAR_AMF_UE_ALL_TIMERS(amf_ue);
     ogs_timer_delete(amf_ue->t3513.timer);

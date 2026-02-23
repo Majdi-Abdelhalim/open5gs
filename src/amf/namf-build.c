@@ -271,15 +271,105 @@ ogs_sbi_request_t *amf_namf_comm_build_create_ue_context(
             (char *)OGS_SBI_CONTENT_NGAP_TYPE;
     message.num_of_part++;
 
+    /*
+     * Populate pdu_session_list with HR sessions that have N2 SM info
+     * from H-SMF (collected via UpdateSMContext in Phase 1A).
+     * Each session's handover_request transfer is added as a multipart
+     * binary part referenced by content-id "n2-sm-psi-{psi}".
+     */
+    {
+        amf_sess_t *sess = NULL;
+
+        ogs_list_for_each(&amf_ue->sess_list, sess) {
+            if (!sess->lbo_roaming_allowed &&
+                    SESSION_CONTEXT_IN_SMF(sess) &&
+                    sess->transfer.handover_request) {
+                OpenAPI_pdu_session_context_t *PduSessionContext = NULL;
+                OpenAPI_snssai_t *sNSSAI = NULL;
+                ogs_pkbuf_t *n2smbuf = NULL;
+                char content_id[32];
+
+                if (message.num_of_part >= OGS_SBI_MAX_NUM_OF_PART) {
+                    ogs_warn("Too many multipart parts, "
+                            "skipping PSI[%d]", sess->psi);
+                    break;
+                }
+
+                PduSessionContext =
+                        ogs_calloc(1, sizeof(*PduSessionContext));
+                ogs_assert(PduSessionContext);
+
+                sNSSAI = ogs_calloc(1, sizeof(*sNSSAI));
+                ogs_assert(sNSSAI);
+
+                PduSessionContext->pdu_session_id = sess->psi;
+                if (sess->sm_context_resource_uri)
+                    PduSessionContext->sm_context_ref =
+                        ogs_strdup(sess->sm_context_resource_uri);
+                sNSSAI->sst = sess->s_nssai.sst;
+                sNSSAI->sd =
+                        ogs_s_nssai_sd_to_string(sess->s_nssai.sd);
+                PduSessionContext->s_nssai = sNSSAI;
+                if (sess->dnn)
+                    PduSessionContext->dnn = ogs_strdup(sess->dnn);
+                PduSessionContext->access_type =
+                    (OpenAPI_access_type_e)amf_ue->nas.access_type;
+
+                OpenAPI_list_add(
+                        UeContextCreateData.pdu_session_list,
+                        PduSessionContext);
+
+                /* Add N2 SM handover_request as multipart binary part */
+                ogs_snprintf(content_id, sizeof(content_id),
+                        "n2-sm-psi-%d", sess->psi);
+
+                n2smbuf = ogs_pkbuf_alloc(NULL,
+                        sess->transfer.handover_request->len);
+                ogs_assert(n2smbuf);
+                ogs_pkbuf_put_data(n2smbuf,
+                        sess->transfer.handover_request->data,
+                        sess->transfer.handover_request->len);
+
+                message.part[message.num_of_part].pkbuf = n2smbuf;
+                message.part[message.num_of_part].content_id =
+                        ogs_strdup(content_id);
+                message.part[message.num_of_part].content_type =
+                        (char *)OGS_SBI_CONTENT_NGAP_TYPE;
+                message.num_of_part++;
+
+                ogs_info("[%s:%d] Added HR session to CreateUEContext",
+                        amf_ue->supi, sess->psi);
+            }
+        }
+    }
+
     request = ogs_sbi_build_request(&message);
     ogs_expect(request);
 
     /* Cleanup */
     ogs_pkbuf_free(container_pkbuf);
+
+    /* Free additional multipart parts (N2 SM for HR sessions) */
+    {
+        int pi;
+        for (pi = 1; pi < message.num_of_part; pi++) {
+            if (message.part[pi].pkbuf)
+                ogs_pkbuf_free(message.part[pi].pkbuf);
+            if (message.part[pi].content_id)
+                ogs_free(message.part[pi].content_id);
+        }
+    }
+
     if (UeContextCreateData.n2_notify_uri)
         ogs_free(UeContextCreateData.n2_notify_uri);
-    if (UeContextCreateData.pdu_session_list)
+    if (UeContextCreateData.pdu_session_list) {
+        OpenAPI_lnode_t *node = NULL;
+        OpenAPI_list_for_each(UeContextCreateData.pdu_session_list, node) {
+            OpenAPI_pdu_session_context_free(
+                    (OpenAPI_pdu_session_context_t *)node->data);
+        }
         OpenAPI_list_free(UeContextCreateData.pdu_session_list);
+    }
     amf_nsmf_pdusession_free_target_id(targetId);
     if (serving_plmn_id)
         OpenAPI_plmn_id_free(serving_plmn_id);
