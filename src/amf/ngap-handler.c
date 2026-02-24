@@ -4430,6 +4430,33 @@ void ngap_handle_handover_cancel(
             ogs_expect(r == OGS_OK);
             ogs_assert(r != OGS_ERROR);
 
+            /*
+             * Phase 2: Send UpdateSMContext(hoState=CANCELLED) to V-SMF
+             * for each home-routed session to roll back handover state.
+             * HandoverCancelAck is already sent; this is fire-and-forget.
+             */
+            ogs_list_for_each(&amf_ue_check->sess_list, sess) {
+                if (!SESSION_CONTEXT_IN_SMF(sess)) continue;
+                if (sess->lbo_roaming_allowed) continue;
+
+                memset(&param, 0, sizeof(param));
+                param.hoState = OpenAPI_ho_state_CANCELLED;
+                param.ngApCause.group = Cause->present;
+                param.ngApCause.value = (int)Cause->choice.radioNetwork;
+
+                r = amf_sess_sbi_discover_and_send(
+                        OGS_SBI_SERVICE_TYPE_NSMF_PDUSESSION, NULL,
+                        amf_nsmf_pdusession_build_update_sm_context,
+                        source_ue, sess,
+                        AMF_UPDATE_SM_CONTEXT_HANDOVER_CANCEL, &param);
+                ogs_expect(r == OGS_OK);
+                ogs_assert(r != OGS_ERROR);
+
+                ogs_info("[%s:%d] Sent UpdateSMContext(CANCELLED) "
+                        "to V-SMF for HR cancel",
+                        amf_ue_check->supi, sess->psi);
+            }
+
             amf_ue_check->inter_amf_handover = false;
             return;
         }

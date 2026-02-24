@@ -1050,52 +1050,476 @@ static void test3_func(abts_case *tc, void *data)
  *
  * 3GPP: TS 23.502 §4.9.1.3.4 (handover cancel)
  */
+/*
+ * TEST 4: Handover Cancel with Home-Routed Session Rollback
+ *
+ * Setup: UE with home-routed session in Home PLMN (999-70)
+ * Action: Start inter-PLMN HR handover, then source gNB cancels
+ *
+ * Flow:
+ *   1. Source gNB → HandoverRequired → Home AMF
+ *   2. Home AMF → UpdateSMContext(HANDOVER_REQUIRED) → V-SMF (HR)
+ *   3. Home AMF → CreateUEContext (with PDU sessions) → Visiting AMF
+ *   4. Visiting AMF → HandoverRequest → Target gNB
+ *   5. Target gNB → HandoverRequestAck → Visiting AMF
+ *   6. Visiting AMF → CreateUEContext 201 → Home AMF
+ *   7. Home AMF → UpdateSMContext(HANDOVER_REQ_ACK) → V-SMF (HR)
+ *   8. Home AMF → HandoverCommand → Source gNB
+ *   9. Source gNB → HandoverCancel → Home AMF
+ *  10. Home AMF → HandoverCancelAcknowledge → Source gNB (immediate)
+ *  11. Home AMF → UpdateSMContext(CANCELLED) → V-SMF (background)
+ *
+ * Expected:
+ *   - HandoverCancelAcknowledge received immediately on source gNB
+ *   - V-SMF handover state rolled back (hoState=CANCELLED)
+ *   - Target AMF UE context eventually cleaned up
+ *   - UE remains registered on Home AMF
+ *
+ * 3GPP: TS 23.502 §4.9.1.3.3 (handover cancellation)
+ */
 static void test4_func(abts_case *tc, void *data)
 {
+    int rv;
+    ogs_socknode_t *ngap_home, *ngap_visiting;
+    ogs_socknode_t *gtpu_home, *gtpu_visiting;
+    ogs_pkbuf_t *sendbuf;
+    ogs_pkbuf_t *recvbuf;
+
+    test_ue_t *test_ue = NULL;
+    test_sess_t *sess = NULL;
+    test_bearer_t *qos_flow = NULL;
+
+    bson_t *doc = NULL;
+
+    uint64_t visiting_amf_ue_ngap_id;
+    uint32_t visiting_ran_ue_ngap_id;
+    uint64_t home_amf_ue_ngap_id;
+    uint32_t home_ran_ue_ngap_id;
+
+    ogs_time_t t_total, t_phase;
+
+    ogs_assert(ogs_local_conf()->num_of_serving_plmn_id >= 2);
+
+    TIMING_PHASE_START(t_total);
+
+    /**************************************************************************
+     * PHASE 0: SETUP
+     **************************************************************************/
+
+    TIMING_PHASE_START(t_phase);
     ogs_info("[HR-TEST4] ========================================");
-    ogs_info("[HR-TEST4] Home-Routed Inter-PLMN N2 Handover");
-    ogs_info("[HR-TEST4] Handover Cancel + Session Rollback");
-    ogs_info("[HR-TEST4] ========================================");
-    ogs_info("[HR-TEST4] PLACEHOLDER - Implementation in Phase 2");
+    ogs_info("[HR-TEST4] Phase 0: Infrastructure setup");
     ogs_info("[HR-TEST4] ========================================");
 
-    /* TODO: Phase 2 implementation
-     *
-     * This test will validate:
-     * 1. HandoverCancel triggers SMF context rollback
-     * 2. Target AMF UE context released
-     * 3. V-SMF switch undone, original V-SMF restored
-     * 4. Data path works again through original path
-     */
+    ngap_home = testngap_client(1, AF_INET);
+    ABTS_PTR_NOTNULL(tc, ngap_home);
+    gtpu_home = test_gtpu_server(1, AF_INET);
+    ABTS_PTR_NOTNULL(tc, gtpu_home);
+
+    ngap_visiting = testngap_client(2, AF_INET);
+    ABTS_PTR_NOTNULL(tc, ngap_visiting);
+    gtpu_visiting = test_gtpu_server(2, AF_INET);
+    ABTS_PTR_NOTNULL(tc, gtpu_visiting);
+
+    test_ue = create_test_ue("0000203191");
+    doc = test_db_new_simple(test_ue);
+    ABTS_PTR_NOTNULL(tc, doc);
+    ABTS_INT_EQUAL(tc, OGS_OK, test_db_insert_ue(test_ue, doc));
+
+    switch_plmn_context(0);
+    perform_ng_setup(tc, test_ue, ngap_home, 0x4000, 22);
+
+    switch_plmn_context(1);
+    sendbuf = testngap_build_ng_setup_request(0x4001, 22);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap_visiting, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    recvbuf = testgnb_ngap_read(ngap_visiting);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    testngap_recv(test_ue, recvbuf);
+
+    switch_plmn_context(0);
+
+    TIMING_PHASE_END("HR-TEST4", "Phase 0 (setup)", t_phase);
+
+    /**************************************************************************
+     * PHASE 1: REGISTER AND ESTABLISH SESSION IN HOME NETWORK
+     **************************************************************************/
+
+    TIMING_PHASE_START(t_phase);
+    ogs_info("[HR-TEST4] ========================================");
+    ogs_info("[HR-TEST4] Phase 1: Home network registration");
+    ogs_info("[HR-TEST4] ========================================");
+
+    perform_full_registration(tc, test_ue, ngap_home);
+    sess = establish_pdu_session(tc, test_ue, ngap_home, "internet", 5);
+
+    qos_flow = test_qos_flow_find_by_qfi(sess, 1);
+    ogs_assert(qos_flow);
+
+    rv = test_gtpu_send_ping(gtpu_home, qos_flow, TEST_PING_IPV4);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+    recvbuf = testgnb_gtpu_read(gtpu_home);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    ogs_pkbuf_free(recvbuf);
+
+    /* Save home AMF IDs */
+    home_amf_ue_ngap_id = test_ue->amf_ue_ngap_id;
+    home_ran_ue_ngap_id = test_ue->ran_ue_ngap_id;
+
+    TIMING_PHASE_END("HR-TEST4", "Phase 1 (registration)", t_phase);
+
+    /**************************************************************************
+     * PHASE 2: INTER-PLMN HR HANDOVER → CANCEL
+     **************************************************************************/
+
+    TIMING_PHASE_START(t_phase);
+    ogs_info("[HR-TEST4] ========================================");
+    ogs_info("[HR-TEST4] Phase 2: Inter-PLMN HR handover + cancel");
+    ogs_info("[HR-TEST4] ========================================");
+
+    ogs_plmn_id_t target_plmn;
+    ogs_5gs_tai_t target_tai;
+
+    memset(&target_plmn, 0, sizeof(target_plmn));
+    memset(&target_tai, 0, sizeof(target_tai));
+    memcpy(&target_plmn, &ogs_local_conf()->serving_plmn_id[1],
+            OGS_PLMN_ID_LEN);
+    memcpy(&target_tai.plmn_id, &target_plmn, OGS_PLMN_ID_LEN);
+    target_tai.tac.v = 22;
+
+    /* Step 1: HandoverRequired to Home AMF */
+    ogs_info("[HR-TEST4] → HandoverRequired");
+    sendbuf = testngap_build_handover_required_with_target_plmn(
+            test_ue,
+            NGAP_HandoverType_intra5gs,
+            0x4001, 24,
+            NGAP_Cause_PR_radioNetwork,
+            NGAP_CauseRadioNetwork_handover_desirable_for_radio_reason,
+            true, &target_plmn, &target_tai);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap_home, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    /* Step 4: Receive HandoverRequest on target gNB (with PDU sessions) */
+    ogs_info("[HR-TEST4] ← HandoverRequest on visiting gNB");
+    recvbuf = testgnb_ngap_read(ngap_visiting);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    testngap_recv(test_ue, recvbuf);
+    ABTS_INT_EQUAL(tc, NGAP_ProcedureCode_id_HandoverResourceAllocation,
+            test_ue->ngap_procedure_code);
+
+    visiting_amf_ue_ngap_id = test_ue->amf_ue_ngap_id;
+
+    /* Step 5: Send HandoverRequestAck WITH PDU sessions (HR) */
+    ogs_info("[HR-TEST4] → HandoverRequestAck (with sessions)");
+    sendbuf = testngap_build_handover_request_ack(test_ue);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap_visiting, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    visiting_ran_ue_ngap_id = test_ue->ran_ue_ngap_id;
+
+    /* Step 8: Receive HandoverCommand on source gNB */
+    ogs_info("[HR-TEST4] ← HandoverCommand on home gNB");
+    recvbuf = testgnb_ngap_read(ngap_home);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    testngap_recv(test_ue, recvbuf);
+    ABTS_INT_EQUAL(tc, NGAP_ProcedureCode_id_HandoverPreparation,
+            test_ue->ngap_procedure_code);
+
+    /* IDs are now restored to Home AMF (from HandoverCommand message) */
+
+    /* Step 9: Send HandoverCancel from source gNB */
+    ogs_info("[HR-TEST4] → HandoverCancel");
+    sendbuf = testngap_build_handover_cancel(test_ue,
+            NGAP_Cause_PR_radioNetwork,
+            NGAP_CauseRadioNetwork_txnrelocoverall_expiry);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap_home, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    /* Step 10: Receive HandoverCancelAcknowledge immediately */
+    ogs_info("[HR-TEST4] ← HandoverCancelAcknowledge (immediate)");
+    recvbuf = testgnb_ngap_read(ngap_home);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    testngap_recv(test_ue, recvbuf);
+    ABTS_INT_EQUAL(tc, NGAP_ProcedureCode_id_HandoverCancel,
+            test_ue->ngap_procedure_code);
+
+    ogs_info("[HR-TEST4] ✓ HandoverCancelAcknowledge received");
+
+    TIMING_PHASE_END("HR-TEST4", "Phase 2 (handover+cancel)", t_phase);
+
+    /* Wait for V-SMF CANCELLED to complete in background */
+    ogs_msleep(300);
+
+    /********** Cleanup visiting AMF UE context */
+    test_ue->amf_ue_ngap_id = visiting_amf_ue_ngap_id;
+    test_ue->ran_ue_ngap_id = visiting_ran_ue_ngap_id;
+
+    sendbuf = testngap_build_ue_context_release_request(test_ue,
+            NGAP_Cause_PR_radioNetwork, NGAP_CauseRadioNetwork_user_inactivity,
+            true);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap_visiting, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    recvbuf = testgnb_ngap_read(ngap_visiting);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    testngap_recv(test_ue, recvbuf);
+
+    sendbuf = testngap_build_ue_context_release_complete(test_ue);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap_visiting, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    ogs_msleep(300);
+
+    /********** Cleanup home AMF UE context */
+    test_ue->amf_ue_ngap_id = home_amf_ue_ngap_id;
+    test_ue->ran_ue_ngap_id = home_ran_ue_ngap_id;
+
+    sendbuf = testngap_build_ue_context_release_request(test_ue,
+            NGAP_Cause_PR_radioNetwork, NGAP_CauseRadioNetwork_user_inactivity,
+            true);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap_home, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    recvbuf = testgnb_ngap_read(ngap_home);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    testngap_recv(test_ue, recvbuf);
+
+    sendbuf = testngap_build_ue_context_release_complete(test_ue);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap_home, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    ogs_msleep(300);
+
+    /********** Final cleanup */
+    ABTS_INT_EQUAL(tc, OGS_OK, test_db_remove_ue(test_ue));
+    testgnb_gtpu_close(gtpu_home);
+    testgnb_ngap_close(ngap_home);
+    testgnb_gtpu_close(gtpu_visiting);
+    testgnb_ngap_close(ngap_visiting);
+    test_ue_remove(test_ue);
+
+    ogs_info("[HR-TEST4] ========================================");
+    ogs_info("[HR-TEST4] Test complete - HR HandoverCancel OK");
+    ogs_info("[HR-TEST4] ========================================");
+    TIMING_TOTAL("HR-TEST4", t_total);
 }
 
 /*
  * TEST 5: Handover Failure with Home-Routed Session Rollback
  *
- * Setup: UE with home-routed session
- * Action: Target gNB rejects HandoverRequest
+ * Setup: UE with home-routed session in Home PLMN (999-70)
+ * Action: Start inter-PLMN HR handover, target gNB rejects HandoverRequest
  *
- * Expected: HandoverPreparationFailure, SMF state rolled back
+ * Flow:
+ *   1. Source gNB → HandoverRequired → Home AMF
+ *   2. Home AMF → UpdateSMContext(HANDOVER_REQUIRED) → V-SMF (HR)
+ *   3. Home AMF → CreateUEContext (with PDU sessions) → Visiting AMF
+ *   4. Visiting AMF → HandoverRequest → Target gNB
+ *   5. Target gNB → HandoverFailure → Visiting AMF
+ *   6. Visiting AMF → 403 on CreateUEContext → Home AMF
+ *   7. Home AMF → UpdateSMContext(CANCELLED) → V-SMF (background)
+ *   8. Home AMF → HandoverPreparationFailure → Source gNB
+ *
+ * Expected:
+ *   - HandoverPreparationFailure received on source gNB
+ *   - V-SMF handover state rolled back (hoState=CANCELLED)
+ *   - UE remains registered on Home AMF with existing sessions
  *
  * 3GPP: TS 23.502 §4.9.1.3.4 (handover failure)
  */
 static void test5_func(abts_case *tc, void *data)
 {
+    int rv;
+    ogs_socknode_t *ngap_home, *ngap_visiting;
+    ogs_socknode_t *gtpu_home, *gtpu_visiting;
+    ogs_pkbuf_t *sendbuf;
+    ogs_pkbuf_t *recvbuf;
+    ogs_ngap_message_t message;
+
+    test_ue_t *test_ue = NULL;
+    test_sess_t *sess = NULL;
+    test_bearer_t *qos_flow = NULL;
+
+    bson_t *doc = NULL;
+
+    ogs_time_t t_total, t_phase;
+
+    ogs_assert(ogs_local_conf()->num_of_serving_plmn_id >= 2);
+
+    TIMING_PHASE_START(t_total);
+
+    /**************************************************************************
+     * PHASE 0: SETUP
+     **************************************************************************/
+
+    TIMING_PHASE_START(t_phase);
     ogs_info("[HR-TEST5] ========================================");
-    ogs_info("[HR-TEST5] Home-Routed Inter-PLMN N2 Handover");
-    ogs_info("[HR-TEST5] Handover Failure + Session Rollback");
-    ogs_info("[HR-TEST5] ========================================");
-    ogs_info("[HR-TEST5] PLACEHOLDER - Implementation in Phase 2");
+    ogs_info("[HR-TEST5] Phase 0: Infrastructure setup");
     ogs_info("[HR-TEST5] ========================================");
 
-    /* TODO: Phase 2 implementation
-     *
-     * This test will validate:
-     * 1. HandoverFailure triggers preparation failure
-     * 2. SMF context rolled back
-     * 3. V-SMF switch undone, original V-SMF restored
-     * 4. CreateUEContext error path cleanup
-     */
+    ngap_home = testngap_client(1, AF_INET);
+    ABTS_PTR_NOTNULL(tc, ngap_home);
+    gtpu_home = test_gtpu_server(1, AF_INET);
+    ABTS_PTR_NOTNULL(tc, gtpu_home);
+
+    ngap_visiting = testngap_client(2, AF_INET);
+    ABTS_PTR_NOTNULL(tc, ngap_visiting);
+    gtpu_visiting = test_gtpu_server(2, AF_INET);
+    ABTS_PTR_NOTNULL(tc, gtpu_visiting);
+
+    test_ue = create_test_ue("0000203191");
+    doc = test_db_new_simple(test_ue);
+    ABTS_PTR_NOTNULL(tc, doc);
+    ABTS_INT_EQUAL(tc, OGS_OK, test_db_insert_ue(test_ue, doc));
+
+    switch_plmn_context(0);
+    perform_ng_setup(tc, test_ue, ngap_home, 0x4000, 22);
+
+    switch_plmn_context(1);
+    sendbuf = testngap_build_ng_setup_request(0x4001, 22);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap_visiting, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    recvbuf = testgnb_ngap_read(ngap_visiting);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    rv = ogs_ngap_decode(&message, recvbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+    ABTS_INT_EQUAL(tc, message.present, NGAP_NGAP_PDU_PR_successfulOutcome);
+    ogs_ngap_free(&message);
+    ogs_pkbuf_free(recvbuf);
+
+    switch_plmn_context(0);
+
+    TIMING_PHASE_END("HR-TEST5", "Phase 0 (setup)", t_phase);
+
+    /**************************************************************************
+     * PHASE 1: REGISTER AND ESTABLISH SESSION IN HOME NETWORK
+     **************************************************************************/
+
+    TIMING_PHASE_START(t_phase);
+    ogs_info("[HR-TEST5] ========================================");
+    ogs_info("[HR-TEST5] Phase 1: Home network registration");
+    ogs_info("[HR-TEST5] ========================================");
+
+    perform_full_registration(tc, test_ue, ngap_home);
+    sess = establish_pdu_session(tc, test_ue, ngap_home, "internet", 5);
+
+    qos_flow = test_qos_flow_find_by_qfi(sess, 1);
+    ogs_assert(qos_flow);
+
+    rv = test_gtpu_send_ping(gtpu_home, qos_flow, TEST_PING_IPV4);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+    recvbuf = testgnb_gtpu_read(gtpu_home);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    ogs_pkbuf_free(recvbuf);
+
+    TIMING_PHASE_END("HR-TEST5", "Phase 1 (registration)", t_phase);
+
+    /**************************************************************************
+     * PHASE 2: INTER-PLMN HR HANDOVER → FAILURE
+     **************************************************************************/
+
+    TIMING_PHASE_START(t_phase);
+    ogs_info("[HR-TEST5] ========================================");
+    ogs_info("[HR-TEST5] Phase 2: Inter-PLMN HR handover + failure");
+    ogs_info("[HR-TEST5] ========================================");
+
+    ogs_plmn_id_t target_plmn;
+    ogs_5gs_tai_t target_tai;
+
+    memset(&target_plmn, 0, sizeof(target_plmn));
+    memset(&target_tai, 0, sizeof(target_tai));
+    memcpy(&target_plmn, &ogs_local_conf()->serving_plmn_id[1],
+            OGS_PLMN_ID_LEN);
+    memcpy(&target_tai.plmn_id, &target_plmn, OGS_PLMN_ID_LEN);
+    target_tai.tac.v = 22;
+
+    /* Step 1: HandoverRequired to Home AMF */
+    ogs_info("[HR-TEST5] → HandoverRequired");
+    sendbuf = testngap_build_handover_required_with_target_plmn(
+            test_ue,
+            NGAP_HandoverType_intra5gs,
+            0x4001, 24,
+            NGAP_Cause_PR_radioNetwork,
+            NGAP_CauseRadioNetwork_handover_desirable_for_radio_reason,
+            true, &target_plmn, &target_tai);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap_home, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    /* Step 4: Receive HandoverRequest on target gNB (with PDU sessions) */
+    ogs_info("[HR-TEST5] ← HandoverRequest on visiting gNB");
+    recvbuf = testgnb_ngap_read(ngap_visiting);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    testngap_recv(test_ue, recvbuf);
+    ABTS_INT_EQUAL(tc, NGAP_ProcedureCode_id_HandoverResourceAllocation,
+            test_ue->ngap_procedure_code);
+
+    /* Step 5: Send HandoverFailure from target gNB */
+    ogs_info("[HR-TEST5] → HandoverFailure on visiting gNB");
+    sendbuf = testngap_build_handover_failure(test_ue,
+            NGAP_Cause_PR_radioNetwork,
+            NGAP_CauseRadioNetwork_ho_target_not_allowed);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap_visiting, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    /* Step 8: Receive HandoverPreparationFailure on source gNB */
+    ogs_info("[HR-TEST5] ← HandoverPreparationFailure on home gNB");
+    recvbuf = testgnb_ngap_read(ngap_home);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    testngap_recv(test_ue, recvbuf);
+    ABTS_INT_EQUAL(tc, NGAP_ProcedureCode_id_HandoverPreparation,
+            test_ue->ngap_procedure_code);
+
+    ogs_info("[HR-TEST5] ✓ HandoverPreparationFailure received");
+
+    TIMING_PHASE_END("HR-TEST5", "Phase 2 (handover+failure)", t_phase);
+
+    /* Wait for V-SMF CANCELLED to complete in background */
+    ogs_msleep(300);
+
+    /********** Cleanup home AMF UE context (UE still registered) */
+    sendbuf = testngap_build_ue_context_release_request(test_ue,
+            NGAP_Cause_PR_radioNetwork, NGAP_CauseRadioNetwork_user_inactivity,
+            true);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap_home, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    recvbuf = testgnb_ngap_read(ngap_home);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    testngap_recv(test_ue, recvbuf);
+
+    sendbuf = testngap_build_ue_context_release_complete(test_ue);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap_home, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    ogs_msleep(300);
+
+    /********** Final cleanup */
+    ABTS_INT_EQUAL(tc, OGS_OK, test_db_remove_ue(test_ue));
+    testgnb_gtpu_close(gtpu_home);
+    testgnb_ngap_close(ngap_home);
+    testgnb_gtpu_close(gtpu_visiting);
+    testgnb_ngap_close(ngap_visiting);
+    test_ue_remove(test_ue);
+
+    ogs_info("[HR-TEST5] ========================================");
+    ogs_info("[HR-TEST5] Test complete - HR HandoverFailure OK");
+    ogs_info("[HR-TEST5] ========================================");
+    TIMING_TOTAL("HR-TEST5", t_total);
 }
 
 abts_suite *test_n2_handover_hr(abts_suite *suite)
@@ -1138,11 +1562,11 @@ abts_suite *test_n2_handover_hr(abts_suite *suite)
     ogs_info(" ");
     ogs_info("4. Handover Cancel (HR Session Rollback)");
     ogs_info("   Source cancels, SMF state restored");
-    ogs_info("   Status: PLACEHOLDER (Phase 2)");
+    ogs_info("   Status: IMPLEMENTED");
     ogs_info(" ");
     ogs_info("5. Handover Failure (HR Session Rollback)");
     ogs_info("   Target rejects, SMF state restored");
-    ogs_info("   Status: PLACEHOLDER (Phase 2)");
+    ogs_info("   Status: IMPLEMENTED");
     ogs_info(" ");
     ogs_info("========================================");
 

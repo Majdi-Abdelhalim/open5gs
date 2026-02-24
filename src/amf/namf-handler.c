@@ -2357,6 +2357,36 @@ int amf_namf_comm_handle_create_ue_context_response(
             r = ngap_send_handover_preparation_failure(source_ue, &cause);
             ogs_expect(r == OGS_OK);
             ogs_assert(r != OGS_ERROR);
+
+            /*
+             * Phase 2: Send UpdateSMContext(hoState=CANCELLED) to V-SMF
+             * for each home-routed session to roll back handover state.
+             * HandoverPreparationFailure is already sent.
+             */
+            {
+                amf_sess_t *sess = NULL;
+                amf_nsmf_pdusession_sm_context_param_t param;
+
+                ogs_list_for_each(&amf_ue->sess_list, sess) {
+                    if (!SESSION_CONTEXT_IN_SMF(sess)) continue;
+                    if (sess->lbo_roaming_allowed) continue;
+
+                    memset(&param, 0, sizeof(param));
+                    param.hoState = OpenAPI_ho_state_CANCELLED;
+
+                    r = amf_sess_sbi_discover_and_send(
+                            OGS_SBI_SERVICE_TYPE_NSMF_PDUSESSION, NULL,
+                            amf_nsmf_pdusession_build_update_sm_context,
+                            source_ue, sess,
+                            AMF_UPDATE_SM_CONTEXT_HANDOVER_CANCEL, &param);
+                    ogs_expect(r == OGS_OK);
+                    ogs_assert(r != OGS_ERROR);
+
+                    ogs_info("[%s:%d] Sent UpdateSMContext(CANCELLED) "
+                            "to V-SMF for HR failure rollback",
+                            amf_ue->supi, sess->psi);
+                }
+            }
         }
 
         amf_ue->inter_amf_handover = false;
