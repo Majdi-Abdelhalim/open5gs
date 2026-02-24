@@ -27,10 +27,10 @@ abts_suite *test_n2_handover_hr(abts_suite *suite);
 const struct testlist {
     abts_suite *(*func)(abts_suite *suite);
 } alltests[] = {
+    {test_n2_handover_hr},
+    {test_n2_handover_lbo},
     {test_dereg_roaming},
     {test_mobility_roaming},
-    {test_n2_handover_lbo},
-    {test_n2_handover_hr},
     {NULL},
 };
 

@@ -272,10 +272,14 @@ ogs_sbi_request_t *amf_namf_comm_build_create_ue_context(
     message.num_of_part++;
 
     /*
-     * Populate pdu_session_list with HR sessions that have N2 SM info
-     * from H-SMF (collected via UpdateSMContext in Phase 1A).
-     * Each session's handover_request transfer is added as a multipart
-     * binary part referenced by content-id "n2-sm-psi-{psi}".
+     * Populate pdu_session_list with N2SmInformation entries for HR
+     * sessions that have N2 SM info from H-SMF (collected via
+     * UpdateSMContext in Phase 1A).
+     *
+     * Per TS 29.518, UeContextCreateData.pduSessionList is of type
+     * N2SmInformation (not PduSessionContext). Each entry contains
+     * n2InfoContent referencing a multipart binary part with
+     * content-id "n2-sm-psi-{psi}".
      */
     {
         amf_sess_t *sess = NULL;
@@ -284,7 +288,9 @@ ogs_sbi_request_t *amf_namf_comm_build_create_ue_context(
             if (!sess->lbo_roaming_allowed &&
                     SESSION_CONTEXT_IN_SMF(sess) &&
                     sess->transfer.handover_request) {
-                OpenAPI_pdu_session_context_t *PduSessionContext = NULL;
+                OpenAPI_n2_sm_information_t *N2SmInfo = NULL;
+                OpenAPI_n2_info_content_t *n2InfoContent = NULL;
+                OpenAPI_ref_to_binary_data_t *ngapData = NULL;
                 OpenAPI_snssai_t *sNSSAI = NULL;
                 ogs_pkbuf_t *n2smbuf = NULL;
                 char content_id[32];
@@ -295,34 +301,40 @@ ogs_sbi_request_t *amf_namf_comm_build_create_ue_context(
                     break;
                 }
 
-                PduSessionContext =
-                        ogs_calloc(1, sizeof(*PduSessionContext));
-                ogs_assert(PduSessionContext);
-
-                sNSSAI = ogs_calloc(1, sizeof(*sNSSAI));
-                ogs_assert(sNSSAI);
-
-                PduSessionContext->pdu_session_id = sess->psi;
-                if (sess->sm_context_resource_uri)
-                    PduSessionContext->sm_context_ref =
-                        ogs_strdup(sess->sm_context_resource_uri);
-                sNSSAI->sst = sess->s_nssai.sst;
-                sNSSAI->sd =
-                        ogs_s_nssai_sd_to_string(sess->s_nssai.sd);
-                PduSessionContext->s_nssai = sNSSAI;
-                if (sess->dnn)
-                    PduSessionContext->dnn = ogs_strdup(sess->dnn);
-                PduSessionContext->access_type =
-                    (OpenAPI_access_type_e)amf_ue->nas.access_type;
-
-                OpenAPI_list_add(
-                        UeContextCreateData.pdu_session_list,
-                        PduSessionContext);
-
-                /* Add N2 SM handover_request as multipart binary part */
+                /* Build content-id for this session's N2 SM data */
                 ogs_snprintf(content_id, sizeof(content_id),
                         "n2-sm-psi-%d", sess->psi);
 
+                /* Build N2InfoContent referencing the multipart part */
+                n2InfoContent =
+                        ogs_calloc(1, sizeof(*n2InfoContent));
+                ogs_assert(n2InfoContent);
+                n2InfoContent->ngap_ie_type =
+                        OpenAPI_ngap_ie_type_PDU_RES_SETUP_REQ;
+
+                ngapData = ogs_calloc(1, sizeof(*ngapData));
+                ogs_assert(ngapData);
+                ngapData->content_id = ogs_strdup(content_id);
+                n2InfoContent->ngap_data = ngapData;
+
+                /* Build N2SmInformation */
+                N2SmInfo = ogs_calloc(1, sizeof(*N2SmInfo));
+                ogs_assert(N2SmInfo);
+                N2SmInfo->pdu_session_id = sess->psi;
+                N2SmInfo->n2_info_content = n2InfoContent;
+
+                sNSSAI = ogs_calloc(1, sizeof(*sNSSAI));
+                ogs_assert(sNSSAI);
+                sNSSAI->sst = sess->s_nssai.sst;
+                sNSSAI->sd =
+                        ogs_s_nssai_sd_to_string(sess->s_nssai.sd);
+                N2SmInfo->s_nssai = sNSSAI;
+
+                OpenAPI_list_add(
+                        UeContextCreateData.pdu_session_list,
+                        N2SmInfo);
+
+                /* Add N2 SM handover_request as multipart binary part */
                 n2smbuf = ogs_pkbuf_alloc(NULL,
                         sess->transfer.handover_request->len);
                 ogs_assert(n2smbuf);
@@ -365,8 +377,8 @@ ogs_sbi_request_t *amf_namf_comm_build_create_ue_context(
     if (UeContextCreateData.pdu_session_list) {
         OpenAPI_lnode_t *node = NULL;
         OpenAPI_list_for_each(UeContextCreateData.pdu_session_list, node) {
-            OpenAPI_pdu_session_context_free(
-                    (OpenAPI_pdu_session_context_t *)node->data);
+            OpenAPI_n2_sm_information_free(
+                    (OpenAPI_n2_sm_information_t *)node->data);
         }
         OpenAPI_list_free(UeContextCreateData.pdu_session_list);
     }
