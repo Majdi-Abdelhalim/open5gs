@@ -1539,6 +1539,22 @@ void gmm_state_registered(ogs_fsm_t *s, amf_event_t *e)
                     break;
                 }
 
+                if (state == AMF_NAMF_COMM_N2_INFO_NOTIFY_RAN_STATUS) {
+                    if (sbi_message->res_status != OGS_SBI_HTTP_STATUS_OK) {
+                        ogs_warn("[%s] N2InfoNotify(RAN_STATUS) failed [%d]",
+                                amf_ue->supi, sbi_message->res_status);
+                    } else {
+                        ogs_info("[%s] N2InfoNotify(RAN_STATUS) "
+                                "forwarded successfully", amf_ue->supi);
+                    }
+                    /* Clean up the stored buffer */
+                    if (amf_ue->ran_status_transfer_buf) {
+                        ogs_pkbuf_free(amf_ue->ran_status_transfer_buf);
+                        amf_ue->ran_status_transfer_buf = NULL;
+                    }
+                    break;
+                }
+
                 SWITCH(sbi_message->h.resource.component[2])
                 CASE(OGS_SBI_RESOURCE_NAME_TRANSFER)
 

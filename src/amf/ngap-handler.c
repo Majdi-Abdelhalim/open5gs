@@ -21,6 +21,7 @@
 #include "ngap-path.h"
 #include "sbi-path.h"
 #include "nas-path.h"
+#include "namf-build.h"
 
 static bool maximum_number_of_gnbs_is_reached(void)
 {
@@ -4693,13 +4694,84 @@ void ngap_handle_uplink_ran_status_transfer(
     }
 
     /*
-     * Inter-AMF handover (LBO): no local target_ue exists on the source AMF.
-     * RANStatusTransfer is not forwarded because there are no data radio
-     * bearers being transferred (PDU sessions are released and re-established).
+     * Inter-AMF handover: no local target_ue exists on the source AMF.
+     *
+     * V-SMF insertion (UE at home, HR sessions): data radio bearers ARE
+     * being transferred via V-SMF. Forward the RANStatusTransfer to the
+     * target AMF via N2InfoNotify so the target AMF can send
+     * DownlinkRANStatusTransfer to the target gNB.
+     *
+     * LBO (no HR sessions): PDU sessions are released and re-established.
+     * RANStatusTransfer forwarding is not needed.
      */
     if (amf_ue->inter_amf_handover) {
-        ogs_info("[%s] Inter-AMF handover: "
-                "skip RANStatusTransfer forwarding", amf_ue->supi);
+        bool ue_at_home = !ogs_sbi_plmn_id_in_vplmn(
+                &amf_ue->home_plmn_id);
+        bool has_hr_sessions = false;
+        amf_sess_t *sess = NULL;
+
+        if (ue_at_home) {
+            ogs_list_for_each(&amf_ue->sess_list, sess) {
+                if (!sess->lbo_roaming_allowed &&
+                        SESSION_CONTEXT_IN_SMF(sess)) {
+                    has_hr_sessions = true;
+                    break;
+                }
+            }
+        }
+
+        if (ue_at_home && has_hr_sessions &&
+                RANStatusTransfer_TransparentContainer) {
+            ogs_sbi_discovery_option_t *discovery_option = NULL;
+            ogs_pkbuf_t *pkbuf = NULL;
+            asn_enc_rval_t enc_ret;
+
+            ogs_info("[%s] Inter-AMF V-SMF insertion: "
+                    "forwarding RANStatusTransfer to target AMF",
+                    amf_ue->supi);
+
+            /* APER-encode the RANStatusTransfer_TransparentContainer */
+            pkbuf = ogs_pkbuf_alloc(NULL, OGS_MAX_SDU_LEN);
+            ogs_assert(pkbuf);
+            ogs_pkbuf_put(pkbuf, OGS_MAX_SDU_LEN);
+
+            enc_ret = aper_encode_to_buffer(
+                    &asn_DEF_NGAP_RANStatusTransfer_TransparentContainer,
+                    NULL, RANStatusTransfer_TransparentContainer,
+                    pkbuf->data, OGS_MAX_SDU_LEN);
+            if (enc_ret.encoded < 0) {
+                ogs_error("[%s] APER encode RANStatusTransfer failed",
+                        amf_ue->supi);
+                ogs_pkbuf_free(pkbuf);
+                return;
+            }
+            ogs_pkbuf_trim(pkbuf, ((enc_ret.encoded + 7) >> 3));
+
+            /* Store for the build function */
+            if (amf_ue->ran_status_transfer_buf)
+                ogs_pkbuf_free(amf_ue->ran_status_transfer_buf);
+            amf_ue->ran_status_transfer_buf = pkbuf;
+
+            /* Send N2InfoNotify(RAN_STATUS_TRANSFER) to target AMF */
+            discovery_option = ogs_sbi_discovery_option_new();
+            ogs_assert(discovery_option);
+            ogs_sbi_discovery_option_add_target_plmn_list(
+                    discovery_option,
+                    &amf_ue->inter_plmn_target_plmn_id);
+
+            r = amf_ue_sbi_discover_and_send(
+                    OGS_SBI_SERVICE_TYPE_NAMF_COMM,
+                    discovery_option,
+                    amf_namf_comm_build_n2_info_notify_ran_status,
+                    amf_ue,
+                    AMF_NAMF_COMM_N2_INFO_NOTIFY_RAN_STATUS,
+                    NULL);
+            ogs_expect(r == OGS_OK);
+            ogs_assert(r != OGS_ERROR);
+        } else {
+            ogs_info("[%s] Inter-AMF LBO handover: "
+                    "skip RANStatusTransfer forwarding", amf_ue->supi);
+        }
         return;
     }
 

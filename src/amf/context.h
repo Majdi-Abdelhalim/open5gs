@@ -629,6 +629,9 @@ struct amf_ue_s {
     char *n2_notify_uri;
     ogs_pool_id_t create_ue_context_stream_id;
 
+    /* APER-encoded RANStatusTransfer_TransparentContainer for inter-AMF fwd */
+    ogs_pkbuf_t *ran_status_transfer_buf;
+
     /* Inter-PLMN Handover: stored TargetID for deferred CreateUEContext */
     NGAP_TargetID_t *inter_plmn_target_id;
     ogs_plmn_id_t inter_plmn_target_plmn_id;

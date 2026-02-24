@@ -2155,6 +2155,41 @@ int amf_namf_comm_handle_create_ue_context_request(
     /* Set inter-AMF handover flag */
     amf_ue->inter_amf_handover = true;
 
+    /*
+     * Set home PLMN from source AMF's serving network.
+     * For HOME→VISITED handover, the S-AMF's serving_network
+     * is the UE's home PLMN.
+     */
+    if (CreateData->serving_network) {
+        ogs_sbi_parse_plmn_id_nid(
+                &amf_ue->home_plmn_id, CreateData->serving_network);
+    }
+
+    /*
+     * Set GUAMI from this AMF's served GUAMI configuration.
+     * Required for subsequent SBI requests (e.g., CreateSMContext).
+     */
+    if (amf_self()->num_of_served_guami > 0) {
+        amf_ue->guami = &amf_self()->served_guami[0];
+    }
+
+    /*
+     * Set serving TAI and NR-CGI from target gNB's supported TA.
+     * Required for UE location in CreateSMContext requests.
+     */
+    if (target_gnb->num_of_supported_ta_list > 0 &&
+            target_gnb->supported_ta_list[0].num_of_bplmn_list > 0) {
+        memcpy(&amf_ue->nr_tai.plmn_id,
+                &target_gnb->supported_ta_list[0].bplmn_list[0].plmn_id,
+                sizeof(ogs_plmn_id_t));
+        amf_ue->nr_tai.tac = target_gnb->supported_ta_list[0].tac;
+    }
+    if (target_gnb->gnb_id_presence) {
+        memcpy(&amf_ue->nr_cgi.plmn_id, &target_gnb->plmn_id,
+                sizeof(ogs_plmn_id_t));
+        amf_ue->nr_cgi.cell_id = ((uint64_t)target_gnb_id << 14);
+    }
+
     /* Store n2_notify_uri from source AMF */
     if (CreateData->n2_notify_uri) {
         if (amf_ue->n2_notify_uri) ogs_free(amf_ue->n2_notify_uri);
@@ -2743,6 +2778,67 @@ int amf_namf_comm_handle_n2_info_notify(
     if (!sbi_request->http.content || !sbi_request->http.content_length) {
         ogs_error("[%s] No request body", amf_ue->supi);
         return OGS_ERROR;
+    }
+
+    /*
+     * Check for RAN Status Transfer forwarding (multipart with binary).
+     *
+     * When the source AMF sends RANStatusTransfer via N2InfoNotify,
+     * the request is multipart: JSON + NGAP binary. The SBI framework
+     * parses the binary parts into recvmsg->part[].
+     *
+     * For the existing HANDOVER_COMPLETED notification, the request is
+     * plain JSON (no binary parts).
+     */
+    if (recvmsg->num_of_part > 0) {
+        ogs_pkbuf_t *n2buf = NULL;
+
+        n2buf = ogs_sbi_find_part_by_content_id(
+                recvmsg, (char *)"ngap-ran-status");
+        if (n2buf) {
+            NGAP_RANStatusTransfer_TransparentContainer_t container;
+            int rv;
+
+            ogs_info("[%s] N2InfoNotify: RAN_STATUS_TRANSFER", amf_ue->supi);
+
+            memset(&container, 0, sizeof(container));
+            rv = ogs_asn_decode(
+                    &asn_DEF_NGAP_RANStatusTransfer_TransparentContainer,
+                    &container, sizeof(container), n2buf);
+            if (rv != OGS_OK) {
+                ogs_error("[%s] APER decode RANStatusTransfer failed",
+                        amf_ue->supi);
+                goto ran_status_respond;
+            }
+
+            /* Find target gNB's ran_ue and forward the transfer */
+            ran_ue = ran_ue_find_by_id(amf_ue->ran_ue_id);
+            if (ran_ue) {
+                r = ngap_send_downlink_ran_status_transfer(
+                        ran_ue, &container);
+                ogs_expect(r == OGS_OK);
+
+                ogs_info("[%s] Sent DownlinkRANStatusTransfer to target gNB",
+                        amf_ue->supi);
+            } else {
+                ogs_warn("[%s] No RAN UE context for target gNB",
+                        amf_ue->supi);
+            }
+
+            ogs_asn_free(
+                    &asn_DEF_NGAP_RANStatusTransfer_TransparentContainer,
+                    &container);
+
+ran_status_respond:
+            /* Respond 200 OK */
+            response = ogs_sbi_response_new();
+            ogs_assert(response);
+            response->status = OGS_SBI_HTTP_STATUS_OK;
+            ogs_assert(true ==
+                    ogs_sbi_server_send_response(stream, response));
+
+            return OGS_OK;
+        }
     }
 
     /* Parse N2InformationNotification JSON manually

@@ -1768,6 +1768,8 @@ void amf_ue_remove(amf_ue_t *amf_ue)
     /* Clear Inter-AMF Handover */
     if (amf_ue->n2_notify_uri)
         ogs_free(amf_ue->n2_notify_uri);
+    if (amf_ue->ran_status_transfer_buf)
+        ogs_pkbuf_free(amf_ue->ran_status_transfer_buf);
     amf_ue->inter_amf_handover = false;
     amf_ue->create_ue_context_stream_id = OGS_INVALID_POOL_ID;
 

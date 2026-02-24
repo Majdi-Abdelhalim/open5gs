@@ -22,6 +22,9 @@
 #include "nsmf-build.h"
 
 #include "openapi/model/n2_information_notification.h"
+#include "openapi/model/n2_info_container.h"
+#include "openapi/model/n2_ran_information.h"
+#include "openapi/model/n2_info_content.h"
 
 static char* ogs_guti_to_string(ogs_nas_5gs_guti_t *nas_guti)
 {
@@ -634,6 +637,127 @@ ogs_sbi_request_t *amf_namf_comm_build_n2_info_notify(amf_ue_t *amf_ue)
 
     ogs_sbi_header_set(request->http.headers,
             OGS_SBI_CONTENT_TYPE, OGS_SBI_CONTENT_JSON_TYPE);
+
+    /* User-Agent is needed for SCP routing (requester-nf-type) */
+    ogs_sbi_header_set(request->http.headers,
+            OGS_SBI_USER_AGENT, (char *)"AMF");
+
+    return request;
+}
+
+ogs_sbi_request_t *amf_namf_comm_build_n2_info_notify_ran_status(
+        amf_ue_t *amf_ue, void *data)
+{
+    ogs_sbi_request_t *request = NULL;
+    cJSON *item = NULL;
+    char *json = NULL;
+    char boundary[32];
+    unsigned char digest[16];
+    char *p = NULL, *last;
+    char *content_type = NULL;
+
+    OpenAPI_n2_information_notification_t N2InformationNotification;
+    OpenAPI_n2_info_container_t N2InfoContainer;
+    OpenAPI_n2_ran_information_t RanInfo;
+    OpenAPI_n2_info_content_t N2InfoContent;
+    OpenAPI_ref_to_binary_data_t NgapData;
+
+    ogs_assert(amf_ue);
+    ogs_assert(amf_ue->ran_status_transfer_buf);
+
+    /* Build N2InformationNotification JSON */
+    memset(&NgapData, 0, sizeof(NgapData));
+    NgapData.content_id = (char *)"ngap-ran-status";
+
+    memset(&N2InfoContent, 0, sizeof(N2InfoContent));
+    N2InfoContent.ngap_ie_type =
+            OpenAPI_ngap_ie_type_RAN_STATUS_TRANS_CONTAINER;
+    N2InfoContent.ngap_data = &NgapData;
+
+    memset(&RanInfo, 0, sizeof(RanInfo));
+    RanInfo.n2_info_content = &N2InfoContent;
+
+    memset(&N2InfoContainer, 0, sizeof(N2InfoContainer));
+    N2InfoContainer.n2_information_class = OpenAPI_n2_information_class_RAN;
+    N2InfoContainer.ran_info = &RanInfo;
+
+    memset(&N2InformationNotification, 0, sizeof(N2InformationNotification));
+    N2InformationNotification.n2_notify_subscription_id =
+            amf_ue->supi ? amf_ue->supi : (char *)"unknown";
+    N2InformationNotification.n2_info_container = &N2InfoContainer;
+
+    item = OpenAPI_n2_information_notification_convertToJSON(
+            &N2InformationNotification);
+    if (!item) {
+        ogs_error("[%s] convertToJSON() failed", amf_ue->supi);
+        return NULL;
+    }
+    json = cJSON_PrintUnformatted(item);
+    cJSON_Delete(item);
+    if (!json) {
+        ogs_error("[%s] cJSON_PrintUnformatted() failed", amf_ue->supi);
+        return NULL;
+    }
+
+    /* Build request */
+    request = ogs_sbi_request_new();
+    if (!request) {
+        ogs_error("ogs_sbi_request_new() failed");
+        ogs_free(json);
+        return NULL;
+    }
+
+    request->h.method = ogs_strdup(OGS_SBI_HTTP_METHOD_POST);
+    request->h.service.name =
+            ogs_strdup(OGS_SBI_SERVICE_NAME_NAMF_COMM);
+    request->h.api.version = ogs_strdup(OGS_SBI_API_V1);
+    request->h.resource.component[0] =
+            ogs_strdup(OGS_SBI_RESOURCE_NAME_UE_CONTEXTS);
+    request->h.resource.component[1] = ogs_strdup(amf_ue->supi);
+    request->h.resource.component[2] =
+            ogs_strdup(OGS_SBI_RESOURCE_NAME_N2_INFO_NOTIFY);
+
+    /* Build multipart body: JSON + NGAP binary */
+    ogs_random(digest, 16);
+    strcpy(boundary, "=-");
+    ogs_base64_encode_binary(boundary + 2, digest, 16);
+
+    p = request->http.content = ogs_calloc(1, OGS_MAX_SDU_LEN);
+    if (!p) {
+        ogs_error("ogs_calloc() failed");
+        ogs_free(json);
+        ogs_sbi_request_free(request);
+        return NULL;
+    }
+    last = p + OGS_MAX_SDU_LEN;
+
+    /* JSON part */
+    p = ogs_slprintf(p, last, "--%s\r\n", boundary);
+    p = ogs_slprintf(p, last, "%s: %s\r\n\r\n%s",
+            OGS_SBI_CONTENT_TYPE, OGS_SBI_CONTENT_JSON_TYPE, json);
+    ogs_free(json);
+
+    /* Binary NGAP part */
+    p = ogs_slprintf(p, last, "\r\n--%s\r\n", boundary);
+    p = ogs_slprintf(p, last, "%s: %s\r\n",
+            OGS_SBI_CONTENT_ID, "ngap-ran-status");
+    p = ogs_slprintf(p, last, "%s: %s\r\n\r\n",
+            OGS_SBI_CONTENT_TYPE, OGS_SBI_CONTENT_NGAP_TYPE);
+    memcpy(p, amf_ue->ran_status_transfer_buf->data,
+            amf_ue->ran_status_transfer_buf->len);
+    p += amf_ue->ran_status_transfer_buf->len;
+
+    /* Last boundary */
+    p = ogs_slprintf(p, last, "\r\n--%s--\r\n", boundary);
+
+    request->http.content_length = p - request->http.content;
+
+    content_type = ogs_msprintf("%s; boundary=\"%s\"",
+            OGS_SBI_CONTENT_MULTIPART_TYPE, boundary);
+    ogs_assert(content_type);
+    ogs_sbi_header_set(request->http.headers,
+            OGS_SBI_CONTENT_TYPE, content_type);
+    ogs_free(content_type);
 
     /* User-Agent is needed for SCP routing (requester-nf-type) */
     ogs_sbi_header_set(request->http.headers,
