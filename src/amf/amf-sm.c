@@ -665,7 +665,7 @@ void amf_state_operational(ogs_fsm_t *s, amf_event_t *e)
 
             DEFAULT
                 rv = amf_nsmf_pdusession_handle_create_sm_context(
-                        amf_ue, ran_ue, sess, &sbi_message);
+                        amf_ue, ran_ue, sess, state, &sbi_message);
                 if (rv != OGS_OK) {
                     /*
                      * 1. First PDU session establishment request

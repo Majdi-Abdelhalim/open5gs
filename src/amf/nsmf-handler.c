@@ -26,7 +26,7 @@
 
 int amf_nsmf_pdusession_handle_create_sm_context(
         amf_ue_t *amf_ue, ran_ue_t *ran_ue, amf_sess_t *sess,
-        ogs_sbi_message_t *recvmsg)
+        int state, ogs_sbi_message_t *recvmsg)
 {
     int rv, r;
 
@@ -148,6 +148,77 @@ int amf_nsmf_pdusession_handle_create_sm_context(
 
         ogs_sbi_header_free(&header);
 
+        /*
+         * V-SMF insertion during inter-PLMN handover:
+         * Extract N2 SM (HandoverRequestTransfer with V-UPF N3 F-TEID)
+         * from V-SMF's CreateSMContext response. Store as handover_request.
+         * When all sessions are ready, send NGAP HandoverRequest.
+         */
+        if (state == AMF_CREATE_SM_CONTEXT_HANDOVER_PREPARING) {
+            OpenAPI_sm_context_created_data_t *CreatedData = NULL;
+            ogs_pkbuf_t *n2smbuf = NULL;
+
+            CreatedData = recvmsg->SmContextCreatedData;
+            if (CreatedData && CreatedData->n2_sm_info &&
+                    CreatedData->n2_sm_info->content_id) {
+                n2smbuf = ogs_sbi_find_part_by_content_id(
+                        recvmsg, CreatedData->n2_sm_info->content_id);
+            }
+
+            if (n2smbuf) {
+                ogs_pkbuf_t *n2buf_copy = ogs_pkbuf_alloc(
+                        NULL, n2smbuf->len);
+                ogs_assert(n2buf_copy);
+                ogs_pkbuf_put_data(n2buf_copy,
+                        n2smbuf->data, n2smbuf->len);
+
+                AMF_SESS_STORE_N2_TRANSFER(
+                        sess, handover_request, n2buf_copy);
+
+                ogs_info("[%s:%d] V-SMF CreateSMContext OK: "
+                        "stored HandoverRequestTransfer",
+                        amf_ue->supi, sess->psi);
+            } else {
+                ogs_error("[%s:%d] V-SMF CreateSMContext OK but "
+                        "no N2 SM info in response",
+                        amf_ue->supi, sess->psi);
+            }
+
+            /* Clear the gNB's HandoverRequiredTransfer (no longer needed) */
+            AMF_SESS_CLEAR_N2_TRANSFER(
+                    sess, handover_required_from_gnb);
+
+            /* Check if all V-SMF sessions are ready */
+            if (AMF_SESSION_SYNC_DONE(amf_ue,
+                    AMF_CREATE_SM_CONTEXT_HANDOVER_PREPARING)) {
+
+                ogs_info("[%s] All V-SMF sessions ready, "
+                        "sending HandoverRequest",
+                        amf_ue->supi);
+
+                /* Send HandoverRequest to target gNB */
+                {
+                    ogs_pkbuf_t *ngapbuf = NULL;
+
+                    ngapbuf = ngap_build_handover_request(ran_ue);
+                    if (!ngapbuf) {
+                        ogs_error("ngap_build_handover_request() failed");
+                        /* TODO: send error response to source AMF */
+                        return OGS_ERROR;
+                    }
+
+                    r = ngap_send_to_ran_ue(ran_ue, ngapbuf);
+                    ogs_expect(r == OGS_OK);
+                    ogs_assert(r != OGS_ERROR);
+                }
+
+                ogs_info("[%s] HandoverRequest sent to target gNB "
+                        "(V-SMF insertion)", amf_ue->supi);
+            }
+
+            return OGS_OK;
+        }
+
         if (sess->pdu_session_establishment_accept) {
             /*
              * [1-SERVER] /namf-comm/v1/ue-contexts/{supi}/n1-n2-messages
@@ -179,6 +250,39 @@ int amf_nsmf_pdusession_handle_create_sm_context(
         }
 
     } else {
+        /*
+         * V-SMF insertion HO: CreateSMContext failed at V-SMF.
+         * Respond with CreateUEContext error to source AMF.
+         */
+        if (state == AMF_CREATE_SM_CONTEXT_HANDOVER_PREPARING) {
+            ogs_sbi_stream_t *stream = NULL;
+
+            ogs_error("[%s:%d] V-SMF CreateSMContext failed [%d] "
+                    "during HO PREPARING",
+                    amf_ue->supi, sess->psi, recvmsg->res_status);
+
+            /* Clear stored gNB N2 transfer */
+            AMF_SESS_CLEAR_N2_TRANSFER(
+                    sess, handover_required_from_gnb);
+
+            /* Send error response to source AMF */
+            stream = ogs_sbi_stream_find_by_id(
+                    amf_ue->create_ue_context_stream_id);
+            if (stream) {
+                ogs_sbi_response_t *response = NULL;
+                response = ogs_sbi_response_new();
+                ogs_assert(response);
+                response->status = OGS_SBI_HTTP_STATUS_FORBIDDEN;
+                ogs_assert(true ==
+                    ogs_sbi_server_send_response(stream, response));
+                amf_ue->create_ue_context_stream_id =
+                    OGS_INVALID_POOL_ID;
+            }
+
+            return OGS_ERROR;
+        }
+
+        {
         OpenAPI_sm_context_create_error_t *SmContextCreateError = NULL;
         OpenAPI_ref_to_binary_data_t *n1SmMsg = NULL;
         ogs_pkbuf_t *n1smbuf = NULL;
@@ -236,6 +340,7 @@ int amf_nsmf_pdusession_handle_create_sm_context(
         ogs_assert(r != OGS_ERROR);
 
         return OGS_ERROR;
+        } /* end of normal (non-HO) error block */
     }
 
     return OGS_OK;

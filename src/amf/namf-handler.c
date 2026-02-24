@@ -2175,15 +2175,123 @@ int amf_namf_comm_handle_create_ue_context_request(
     ogs_kdf_nh_gnb(amf_ue->kamf, amf_ue->nh, amf_ue->nh);
 
     /*
-     * Phase 1B: Decode pdu_session_list from CreateUEContext request.
-     * For home-routed sessions, the source AMF sends PduSessionContext
-     * entries along with N2 SM (handover_request) as multipart binary
-     * parts with content-id "n2-sm-psi-{psi}".
-     * We create amf_sess_t entries and store the N2 SM data so that
-     * ngap_build_handover_request() will include them in
-     * PDUSessionResourceSetupListHOReq.
+     * Decode PDU session information from CreateUEContext request.
+     *
+     * Two paths:
+     * 1. V-SMF insertion (session_context_list): Source AMF sends
+     *    PduSessionContext entries with H-SMF info. Target AMF must
+     *    discover V-SMF and send CreateSMContext(hoState=PREPARING).
+     *    gNB's HandoverRequiredTransfer in multipart binary.
+     *
+     * 2. V-SMF change / direct (pdu_session_list): Source AMF sends
+     *    N2SmInformation with SMF's HandoverRequestTransfer.
+     *    Target AMF sends HandoverRequest directly.
      */
-    if (CreateData->pdu_session_list) {
+    bool vsmf_insertion_needed = false;
+
+    if (UeContext->session_context_list) {
+        /* V-SMF insertion path */
+        OpenAPI_lnode_t *node = NULL;
+
+        vsmf_insertion_needed = true;
+
+        OpenAPI_list_for_each(UeContext->session_context_list, node) {
+            OpenAPI_pdu_session_context_t *PduSessionContext = node->data;
+            amf_sess_t *sess = NULL;
+            ogs_pkbuf_t *n2smbuf = NULL;
+            char content_id[32];
+
+            if (!PduSessionContext) {
+                ogs_error("No PduSessionContext in session_context_list");
+                continue;
+            }
+
+            if (PduSessionContext->pdu_session_id < 1 ||
+                    PduSessionContext->pdu_session_id > 15) {
+                ogs_error("Invalid PSI[%d]",
+                        PduSessionContext->pdu_session_id);
+                continue;
+            }
+
+            if (!PduSessionContext->s_nssai) {
+                ogs_error("No S-NSSAI for PSI[%d]",
+                        PduSessionContext->pdu_session_id);
+                continue;
+            }
+
+            sess = amf_sess_add(amf_ue,
+                    PduSessionContext->pdu_session_id);
+            if (!sess) {
+                ogs_error("amf_sess_add(PSI:%d) failed",
+                        PduSessionContext->pdu_session_id);
+                continue;
+            }
+
+            /* Mark as home-routed */
+            sess->lbo_roaming_allowed = false;
+
+            /* Set S-NSSAI */
+            sess->s_nssai.sst = PduSessionContext->s_nssai->sst;
+            sess->s_nssai.sd = ogs_s_nssai_sd_from_string(
+                    PduSessionContext->s_nssai->sd);
+
+            /* Set DNN */
+            if (PduSessionContext->dnn)
+                sess->dnn = ogs_strdup(PduSessionContext->dnn);
+
+            /* Set access type */
+            if (PduSessionContext->access_type)
+                amf_ue->nas.access_type =
+                    (int)PduSessionContext->access_type;
+
+            /*
+             * Store H-SMF URI from source AMF.
+             * smf_service_instance_id carries the H-SMF's base URI.
+             */
+            if (PduSessionContext->smf_service_instance_id) {
+                sess->handover_hsmf_uri =
+                    ogs_strdup(PduSessionContext->smf_service_instance_id);
+                ogs_info("[%s:%d] H-SMF URI: %s",
+                        amf_ue->supi, sess->psi,
+                        sess->handover_hsmf_uri);
+            }
+
+            /* Store source H-SMF sm_context_ref for reference */
+            if (PduSessionContext->sm_context_ref) {
+                /* Don't use STORE_SESSION_CONTEXT — that's for V-SMF */
+                if (sess->sm_context_resource_uri)
+                    ogs_free(sess->sm_context_resource_uri);
+                sess->sm_context_resource_uri =
+                    ogs_strdup(PduSessionContext->sm_context_ref);
+            }
+
+            /* Extract gNB's HandoverRequiredTransfer from multipart */
+            ogs_snprintf(content_id, sizeof(content_id),
+                    "n2-sm-psi-%d", sess->psi);
+
+            n2smbuf = ogs_sbi_find_part_by_content_id(
+                    recvmsg, content_id);
+            if (n2smbuf) {
+                ogs_pkbuf_t *n2buf_copy = NULL;
+
+                n2buf_copy = ogs_pkbuf_alloc(NULL, n2smbuf->len);
+                ogs_assert(n2buf_copy);
+                ogs_pkbuf_put_data(n2buf_copy,
+                        n2smbuf->data, n2smbuf->len);
+
+                AMF_SESS_STORE_N2_TRANSFER(
+                        sess, handover_required_from_gnb, n2buf_copy);
+
+                ogs_info("[%s:%d] Stored gNB HandoverRequiredTransfer "
+                        "for V-SMF insertion at target AMF",
+                        amf_ue->supi, sess->psi);
+            } else {
+                ogs_warn("[%s:%d] No gNB HandoverRequiredTransfer "
+                        "in CreateUEContext",
+                        amf_ue->supi, sess->psi);
+            }
+        }
+    } else if (CreateData->pdu_session_list) {
         OpenAPI_lnode_t *node = NULL;
 
         OpenAPI_list_for_each(CreateData->pdu_session_list, node) {
@@ -2303,8 +2411,41 @@ int amf_namf_comm_handle_create_ue_context_request(
     /* Defer SBI response until HandoverRequestAck comes from target gNB */
     amf_ue->create_ue_context_stream_id = ogs_sbi_id_from_stream(stream);
 
-    /* Send HandoverRequest to target gNB */
-    {
+    if (vsmf_insertion_needed) {
+        /*
+         * V-SMF insertion: Discover V-SMF in local PLMN and send
+         * CreateSMContext(hoState=PREPARING) for each HR session.
+         * HandoverRequest will be sent after all V-SMF responses arrive.
+         */
+        amf_sess_t *sess = NULL;
+
+        ogs_list_for_each(&amf_ue->sess_list, sess) {
+            amf_nsmf_pdusession_sm_context_param_t param;
+
+            if (sess->lbo_roaming_allowed) continue;
+
+            memset(&param, 0, sizeof(param));
+            param.hoState = OpenAPI_ho_state_PREPARING;
+
+            r = amf_sess_sbi_discover_and_send(
+                    OGS_SBI_SERVICE_TYPE_NSMF_PDUSESSION, NULL,
+                    amf_nsmf_pdusession_build_create_sm_context,
+                    target_ue, sess,
+                    AMF_CREATE_SM_CONTEXT_HANDOVER_PREPARING,
+                    &param);
+            ogs_expect(r == OGS_OK);
+            ogs_assert(r != OGS_ERROR);
+
+            ogs_info("[%s:%d] Sent CreateSMContext(PREPARING) "
+                    "to V-SMF for V-SMF insertion",
+                    amf_ue->supi, sess->psi);
+        }
+
+        ogs_info("[CreateUEContext] V-SMF insertion: CreateSMContext "
+                "sent for [%s], awaiting V-SMF responses",
+                amf_ue->supi);
+    } else {
+        /* LBO or V-SMF change: Send HandoverRequest directly */
         ogs_pkbuf_t *ngapbuf = NULL;
 
         ngapbuf = ngap_build_handover_request(target_ue);
@@ -2322,10 +2463,11 @@ int amf_namf_comm_handle_create_ue_context_request(
         r = ngap_send_to_ran_ue(target_ue, ngapbuf);
         ogs_expect(r == OGS_OK);
         ogs_assert(r != OGS_ERROR);
-    }
 
-    ogs_info("[CreateUEContext] HandoverRequest sent to gNB[0x%x] for [%s]",
-            target_gnb_id, amf_ue->supi);
+        ogs_info("[CreateUEContext] HandoverRequest sent to "
+                "gNB[0x%x] for [%s]",
+                target_gnb_id, amf_ue->supi);
+    }
 
     return OGS_OK;
 }

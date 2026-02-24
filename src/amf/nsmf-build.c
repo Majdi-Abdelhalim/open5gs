@@ -145,8 +145,43 @@ ogs_sbi_request_t *amf_nsmf_pdusession_build_create_sm_context(
             OpenAPI_request_type_EXISTING_EMERGENCY_PDU_SESSION)
         SmContextCreateData.request_type = sess->request_type;
 
-    n1SmMsg.content_id = (char *)OGS_SBI_CONTENT_5GNAS_SM_ID;
-    SmContextCreateData.n1_sm_msg = &n1SmMsg;
+    /*
+     * V-SMF insertion during inter-PLMN handover:
+     * Include N2 SM info (gNB's HandoverRequiredTransfer) instead of N1 SM.
+     * Set hoState=PREPARING and h_smf_uri.
+     */
+    if (param && param->hoState == OpenAPI_ho_state_PREPARING) {
+        OpenAPI_ref_to_binary_data_t n2SmInfo;
+
+        SmContextCreateData.ho_state = OpenAPI_ho_state_PREPARING;
+
+        if (sess->handover_hsmf_uri) {
+            SmContextCreateData.h_smf_uri =
+                ogs_strdup(sess->handover_hsmf_uri);
+        }
+
+        /* N2 SM: gNB's HandoverRequiredTransfer */
+        if (sess->transfer.handover_required_from_gnb) {
+            memset(&n2SmInfo, 0, sizeof(n2SmInfo));
+            n2SmInfo.content_id = (char *)OGS_SBI_CONTENT_NGAP_SM_ID;
+            SmContextCreateData.n2_sm_info = &n2SmInfo;
+            SmContextCreateData.n2_sm_info_type =
+                OpenAPI_n2_sm_info_type_HANDOVER_REQUIRED;
+
+            message.part[message.num_of_part].pkbuf =
+                sess->transfer.handover_required_from_gnb;
+            message.part[message.num_of_part].content_id =
+                (char *)OGS_SBI_CONTENT_NGAP_SM_ID;
+            message.part[message.num_of_part].content_type =
+                (char *)OGS_SBI_CONTENT_NGAP_TYPE;
+            message.num_of_part++;
+        }
+
+        /* No N1 SM for handover CreateSMContext */
+    } else {
+        n1SmMsg.content_id = (char *)OGS_SBI_CONTENT_5GNAS_SM_ID;
+        SmContextCreateData.n1_sm_msg = &n1SmMsg;
+    }
 
     SmContextCreateData.an_type = amf_ue->nas.access_type;
     SmContextCreateData.rat_type = amf_ue_rat_type(amf_ue);
@@ -189,30 +224,36 @@ ogs_sbi_request_t *amf_nsmf_pdusession_build_create_sm_context(
 
     if (ogs_sbi_plmn_id_in_vplmn(&amf_ue->home_plmn_id) == true) {
         if (sess->lbo_roaming_allowed == false) {
-            ogs_sbi_nf_instance_t *h_smf_instance = NULL;
-            ogs_sbi_client_t *h_smf_client = NULL;
-            char *apiroot = NULL;
+            /*
+             * HO CreateSMContext: h_smf_uri already set from
+             * sess->handover_hsmf_uri above. Skip NRF discovery path.
+             */
+            if (!(param && param->hoState == OpenAPI_ho_state_PREPARING)) {
+                ogs_sbi_nf_instance_t *h_smf_instance = NULL;
+                ogs_sbi_client_t *h_smf_client = NULL;
+                char *apiroot = NULL;
 
-            /* Home-Routed Roaming */
-            h_smf_instance = OGS_SBI_GET_NF_INSTANCE(
-                    sess->sbi.home_nsmf_pdusession);
-            ogs_assert(h_smf_instance);
-            h_smf_client = NF_INSTANCE_CLIENT(h_smf_instance);
-            ogs_assert(h_smf_client);
+                /* Home-Routed Roaming */
+                h_smf_instance = OGS_SBI_GET_NF_INSTANCE(
+                        sess->sbi.home_nsmf_pdusession);
+                ogs_assert(h_smf_instance);
+                h_smf_client = NF_INSTANCE_CLIENT(h_smf_instance);
+                ogs_assert(h_smf_client);
 
-            SmContextCreateData.h_smf_id = h_smf_instance->id;
+                SmContextCreateData.h_smf_id = h_smf_instance->id;
 
-            apiroot = ogs_sbi_client_apiroot(h_smf_client);
-            ogs_assert(apiroot);
+                apiroot = ogs_sbi_client_apiroot(h_smf_client);
+                ogs_assert(apiroot);
 
-            SmContextCreateData.h_smf_uri =
-                ogs_msprintf("%s/%s/%s/%s", apiroot,
-                        (char *)OGS_SBI_SERVICE_NAME_NSMF_PDUSESSION,
-                        (char *)OGS_SBI_API_V1,
-                        (char *)OGS_SBI_RESOURCE_NAME_PDU_SESSIONS);
-            ogs_assert(SmContextCreateData.h_smf_uri);
+                SmContextCreateData.h_smf_uri =
+                    ogs_msprintf("%s/%s/%s/%s", apiroot,
+                            (char *)OGS_SBI_SERVICE_NAME_NSMF_PDUSESSION,
+                            (char *)OGS_SBI_API_V1,
+                            (char *)OGS_SBI_RESOURCE_NAME_PDU_SESSIONS);
+                ogs_assert(SmContextCreateData.h_smf_uri);
 
-            ogs_free(apiroot);
+                ogs_free(apiroot);
+            }
         }
     }
 
@@ -228,23 +269,28 @@ ogs_sbi_request_t *amf_nsmf_pdusession_build_create_sm_context(
      * What we need to do is proactively add a part that will re-discover
      * the PCF when a situation arises where we really need the PCF-ID.
      */
-    pcf_nf_instance = OGS_SBI_GET_NF_INSTANCE(
-            amf_ue->sbi.service_type_array[
-            OGS_SBI_SERVICE_TYPE_NPCF_AM_POLICY_CONTROL]);
-    if (pcf_nf_instance)
-        SmContextCreateData.pcf_id = pcf_nf_instance->id;
-    else
-        ogs_error("No pcf_nf_instance");
+    if (!(param && param->hoState == OpenAPI_ho_state_PREPARING)) {
+        pcf_nf_instance = OGS_SBI_GET_NF_INSTANCE(
+                amf_ue->sbi.service_type_array[
+                OGS_SBI_SERVICE_TYPE_NPCF_AM_POLICY_CONTROL]);
+        if (pcf_nf_instance)
+            SmContextCreateData.pcf_id = pcf_nf_instance->id;
+        else
+            ogs_error("No pcf_nf_instance");
+    }
 
     message.SmContextCreateData = &SmContextCreateData;
 
-    message.part[message.num_of_part].pkbuf = sess->payload_container;
-    if (message.part[message.num_of_part].pkbuf) {
-        message.part[message.num_of_part].content_id =
-            (char *)OGS_SBI_CONTENT_5GNAS_SM_ID;
-        message.part[message.num_of_part].content_type =
-            (char *)OGS_SBI_CONTENT_5GNAS_TYPE;
-        message.num_of_part++;
+    /* N1 SM binary part (skip for HO — N2 SM already added above) */
+    if (!(param && param->hoState == OpenAPI_ho_state_PREPARING)) {
+        message.part[message.num_of_part].pkbuf = sess->payload_container;
+        if (message.part[message.num_of_part].pkbuf) {
+            message.part[message.num_of_part].content_id =
+                (char *)OGS_SBI_CONTENT_5GNAS_SM_ID;
+            message.part[message.num_of_part].content_type =
+                (char *)OGS_SBI_CONTENT_5GNAS_TYPE;
+            message.num_of_part++;
+        }
     }
 
     message.http.accept = (char *)(OGS_SBI_CONTENT_JSON_TYPE ","

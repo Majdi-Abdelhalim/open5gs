@@ -774,6 +774,10 @@ typedef struct amf_sess_s {
      */
     uint8_t old_gsm_type, current_gsm_type;
 
+    /* H-SMF URI for V-SMF insertion during inter-PLMN handover.
+     * Stored at target AMF from source AMF's PduSessionContext. */
+    char *handover_hsmf_uri;
+
     struct {
         ogs_pkbuf_t *pdu_session_resource_setup_request;
         ogs_pkbuf_t *pdu_session_resource_modification_command;

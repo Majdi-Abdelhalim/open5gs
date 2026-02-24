@@ -2391,6 +2391,9 @@ void amf_sess_remove(amf_sess_t *sess)
     AMF_SESS_CLEAR_N2_TRANSFER(sess, handover_command);
     AMF_SESS_CLEAR_N2_TRANSFER(sess, handover_required_from_gnb);
 
+    if (sess->handover_hsmf_uri)
+        ogs_free(sess->handover_hsmf_uri);
+
     if (sess->paging.client)
         ogs_sbi_client_remove(sess->paging.client);
 

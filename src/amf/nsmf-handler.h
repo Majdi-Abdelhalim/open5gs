@@ -28,7 +28,7 @@ extern "C" {
 
 int amf_nsmf_pdusession_handle_create_sm_context(
         amf_ue_t *amf_ue, ran_ue_t *ran_ue, amf_sess_t *sess,
-        ogs_sbi_message_t *recvmsg);
+        int state, ogs_sbi_message_t *recvmsg);
 int amf_nsmf_pdusession_handle_update_sm_context(
         amf_ue_t *amf_ue, ran_ue_t *ran_ue, amf_sess_t *sess,
         int state, ogs_sbi_message_t *recvmsg);
