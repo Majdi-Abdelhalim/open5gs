@@ -2174,6 +2174,101 @@ int amf_namf_comm_handle_create_ue_context_request(
     amf_ue->nhcc++;
     ogs_kdf_nh_gnb(amf_ue->kamf, amf_ue->nh, amf_ue->nh);
 
+    /*
+     * Phase 1B: Decode pdu_session_list from CreateUEContext request.
+     * For home-routed sessions, the source AMF sends PduSessionContext
+     * entries along with N2 SM (handover_request) as multipart binary
+     * parts with content-id "n2-sm-psi-{psi}".
+     * We create amf_sess_t entries and store the N2 SM data so that
+     * ngap_build_handover_request() will include them in
+     * PDUSessionResourceSetupListHOReq.
+     */
+    if (CreateData->pdu_session_list) {
+        OpenAPI_lnode_t *node = NULL;
+
+        OpenAPI_list_for_each(CreateData->pdu_session_list, node) {
+            OpenAPI_pdu_session_context_t *PduSessionContext = node->data;
+            amf_sess_t *sess = NULL;
+            ogs_pkbuf_t *n2smbuf = NULL;
+            char content_id[32];
+
+            if (!PduSessionContext) {
+                ogs_error("No PduSessionContext in node");
+                continue;
+            }
+
+            if (PduSessionContext->pdu_session_id < 1 ||
+                    PduSessionContext->pdu_session_id > 15) {
+                ogs_error("Invalid PSI[%d]",
+                        PduSessionContext->pdu_session_id);
+                continue;
+            }
+
+            if (!PduSessionContext->s_nssai) {
+                ogs_error("No S-NSSAI for PSI[%d]",
+                        PduSessionContext->pdu_session_id);
+                continue;
+            }
+
+            sess = amf_sess_add(amf_ue,
+                    PduSessionContext->pdu_session_id);
+            if (!sess) {
+                ogs_error("amf_sess_add(PSI:%d) failed",
+                        PduSessionContext->pdu_session_id);
+                continue;
+            }
+
+            /* Mark as home-routed */
+            sess->lbo_roaming_allowed = false;
+
+            /* Set S-NSSAI */
+            sess->s_nssai.sst = PduSessionContext->s_nssai->sst;
+            sess->s_nssai.sd = ogs_s_nssai_sd_from_string(
+                    PduSessionContext->s_nssai->sd);
+
+            /* Set DNN */
+            if (PduSessionContext->dnn)
+                sess->dnn = ogs_strdup(PduSessionContext->dnn);
+
+            /* Store sm_context_ref from source V-SMF (for reference) */
+            if (PduSessionContext->sm_context_ref) {
+                sess->sm_context_resource_uri =
+                    ogs_strdup(PduSessionContext->sm_context_ref);
+            }
+
+            /* Set access type */
+            if (PduSessionContext->access_type)
+                amf_ue->nas.access_type =
+                    (int)PduSessionContext->access_type;
+
+            /* Extract N2 SM (handover_request) from multipart binary */
+            ogs_snprintf(content_id, sizeof(content_id),
+                    "n2-sm-psi-%d", sess->psi);
+
+            n2smbuf = ogs_sbi_find_part_by_content_id(
+                    recvmsg, content_id);
+            if (n2smbuf) {
+                ogs_pkbuf_t *n2buf_copy = NULL;
+
+                n2buf_copy = ogs_pkbuf_alloc(NULL, n2smbuf->len);
+                ogs_assert(n2buf_copy);
+                ogs_pkbuf_put_data(n2buf_copy,
+                        n2smbuf->data, n2smbuf->len);
+
+                AMF_SESS_STORE_N2_TRANSFER(
+                        sess, handover_request, n2buf_copy);
+
+                ogs_info("[%s:%d] Stored HR session N2 SM "
+                        "from CreateUEContext",
+                        amf_ue->supi, sess->psi);
+            } else {
+                ogs_warn("[%s:%d] No N2 SM binary part found "
+                        "for HR session",
+                        amf_ue->supi, sess->psi);
+            }
+        }
+    }
+
     /* Extract SourceToTarget container from multipart binary part */
     sourceToTargetData = CreateData->source_to_target_data;
     if (!sourceToTargetData || !sourceToTargetData->ngap_data ||
@@ -2295,15 +2390,108 @@ int amf_namf_comm_handle_create_ue_context_response(
     ogs_assert(amf_ue->handover.container.buf);
     memcpy(amf_ue->handover.container.buf, n2buf->data, n2buf->len);
 
-    /* Send HandoverCommand to source gNB */
-    r = ngap_send_handover_command(amf_ue);
-    if (r != OGS_OK) {
-        ogs_error("[%s] ngap_send_handover_command() failed", amf_ue->supi);
-        goto failure;
-    }
+    /*
+     * Phase 1C: Extract per-session HandoverRequestAckTransfer from
+     * the 201 response and send UpdateSMContext(HANDOVER_REQ_ACK) to
+     * V-SMF for each HR session. The V-SMF responds with HANDOVER_CMD,
+     * and when all responses arrive, HandoverCommand is sent to source gNB.
+     *
+     * For LBO-only handovers (no pdu_session_list or empty list),
+     * send HandoverCommand immediately (existing behavior).
+     */
+    {
+        bool hr_sessions_pending = false;
 
-    ogs_info("[%s] HandoverCommand sent to source gNB (inter-AMF)",
-            amf_ue->supi);
+        if (CreatedData->pdu_session_list &&
+                CreatedData->pdu_session_list->count > 0) {
+            OpenAPI_lnode_t *node = NULL;
+
+            source_ue = ran_ue_find_by_id(amf_ue->ran_ue_id);
+
+            OpenAPI_list_for_each(CreatedData->pdu_session_list, node) {
+                OpenAPI_n2_sm_information_t *N2SmInfo = node->data;
+                amf_sess_t *sess = NULL;
+                ogs_pkbuf_t *ack_buf = NULL;
+                amf_nsmf_pdusession_sm_context_param_t param;
+
+                if (!N2SmInfo) continue;
+
+                sess = amf_sess_find_by_psi(
+                        amf_ue, N2SmInfo->pdu_session_id);
+                if (!sess) {
+                    ogs_warn("[%s] Cannot find PSI[%d] for ack",
+                            amf_ue->supi, N2SmInfo->pdu_session_id);
+                    continue;
+                }
+
+                if (sess->lbo_roaming_allowed) continue;
+
+                if (!N2SmInfo->n2_info_content ||
+                        !N2SmInfo->n2_info_content->ngap_data ||
+                        !N2SmInfo->n2_info_content->ngap_data->content_id) {
+                    ogs_warn("[%s:%d] No N2 info content in ack",
+                            amf_ue->supi, sess->psi);
+                    continue;
+                }
+
+                ack_buf = ogs_sbi_find_part_by_content_id(
+                        recvmsg,
+                        N2SmInfo->n2_info_content->ngap_data->content_id);
+                if (!ack_buf) {
+                    ogs_warn("[%s:%d] No binary ack transfer",
+                            amf_ue->supi, sess->psi);
+                    continue;
+                }
+
+                if (!SESSION_CONTEXT_IN_SMF(sess)) {
+                    ogs_warn("[%s:%d] Session not in SMF",
+                            amf_ue->supi, sess->psi);
+                    continue;
+                }
+
+                /* Send UpdateSMContext(HANDOVER_REQ_ACK) to V-SMF */
+                memset(&param, 0, sizeof(param));
+                param.n2smbuf = ogs_pkbuf_alloc(NULL, ack_buf->len);
+                ogs_assert(param.n2smbuf);
+                param.n2SmInfoType =
+                        OpenAPI_n2_sm_info_type_HANDOVER_REQ_ACK;
+                ogs_pkbuf_put_data(param.n2smbuf,
+                        ack_buf->data, ack_buf->len);
+                param.hoState = OpenAPI_ho_state_PREPARED;
+
+                r = amf_sess_sbi_discover_and_send(
+                        OGS_SBI_SERVICE_TYPE_NSMF_PDUSESSION, NULL,
+                        amf_nsmf_pdusession_build_update_sm_context,
+                        source_ue, sess,
+                        AMF_UPDATE_SM_CONTEXT_HANDOVER_REQ_ACK, &param);
+                ogs_expect(r == OGS_OK);
+                ogs_assert(r != OGS_ERROR);
+
+                ogs_pkbuf_free(param.n2smbuf);
+
+                hr_sessions_pending = true;
+
+                ogs_info("[%s:%d] Sent UpdateSMContext(HANDOVER_REQ_ACK) "
+                        "to V-SMF", amf_ue->supi, sess->psi);
+            }
+        }
+
+        if (!hr_sessions_pending) {
+            /* LBO-only: send HandoverCommand immediately */
+            r = ngap_send_handover_command(amf_ue);
+            if (r != OGS_OK) {
+                ogs_error("[%s] ngap_send_handover_command() failed",
+                        amf_ue->supi);
+                goto failure;
+            }
+
+            ogs_info("[%s] HandoverCommand sent to source gNB (inter-AMF)",
+                    amf_ue->supi);
+        } else {
+            ogs_info("[%s] Waiting for V-SMF HANDOVER_CMD responses "
+                    "before sending HandoverCommand", amf_ue->supi);
+        }
+    }
 
     return OGS_OK;
 
@@ -2403,12 +2591,55 @@ int amf_namf_comm_handle_n2_info_notify(
         ogs_warn("[%s] No RAN UE context for source gNB", amf_ue->supi);
     }
 
-    /* Release all PDU sessions at the source SMF(s) */
-    memset(&param, 0, sizeof(param));
-    param.ue_location = true;
-    param.ue_timezone = true;
-    amf_sbi_send_release_all_sessions(
-            ran_ue, amf_ue, AMF_RELEASE_SM_CONTEXT_NO_STATE, &param);
+    /* Release all PDU sessions at the source SMF(s)
+     *
+     * Phase 1D: For HR sessions, send UpdateSMContext(hoState=COMPLETED)
+     * to the V-SMF first to notify H-SMF of handover completion.
+     * The session will be released in the nsmf response handler.
+     * For LBO sessions, release directly (existing behavior).
+     */
+    ran_ue = ran_ue_find_by_id(amf_ue->ran_ue_id);
+    {
+        amf_sess_t *sess = NULL;
+        bool hr_sessions_pending = false;
+
+        ogs_list_for_each(&amf_ue->sess_list, sess) {
+            if (!SESSION_CONTEXT_IN_SMF(sess)) continue;
+
+            if (!sess->lbo_roaming_allowed) {
+                /* HR: send UpdateSMContext(hoState=COMPLETED) */
+                amf_nsmf_pdusession_sm_context_param_t sm_param;
+                memset(&sm_param, 0, sizeof(sm_param));
+                sm_param.hoState = OpenAPI_ho_state_COMPLETED;
+
+                r = amf_sess_sbi_discover_and_send(
+                        OGS_SBI_SERVICE_TYPE_NSMF_PDUSESSION, NULL,
+                        amf_nsmf_pdusession_build_update_sm_context,
+                        ran_ue, sess,
+                        AMF_UPDATE_SM_CONTEXT_INTER_PLMN_HANDOVER_NOTIFY,
+                        &sm_param);
+                ogs_expect(r == OGS_OK);
+                ogs_assert(r != OGS_ERROR);
+
+                hr_sessions_pending = true;
+
+                ogs_info("[%s:%d] Sent UpdateSMContext(COMPLETED) "
+                        "to V-SMF", amf_ue->supi, sess->psi);
+            } else {
+                /* LBO: release directly */
+                memset(&param, 0, sizeof(param));
+                param.ue_location = true;
+                param.ue_timezone = true;
+                amf_sbi_send_release_session(
+                        ran_ue, sess,
+                        AMF_RELEASE_SM_CONTEXT_NO_STATE, &param);
+            }
+        }
+
+        if (!hr_sessions_pending) {
+            /* Pure LBO: no HR sessions, nothing else to do */
+        }
+    }
 
     /* Clear inter-AMF handover state */
     amf_ue->inter_amf_handover = false;

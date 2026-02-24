@@ -3924,6 +3924,87 @@ void ngap_handle_handover_request_ack(
                 (char *)OGS_SBI_CONTENT_NGAP_TYPE;
         sendmsg.num_of_part++;
 
+        /*
+         * Phase 1C: Include per-session HandoverRequestAckTransfer
+         * in the CreateUEContext 201 response as N2SmInformation items
+         * with multipart binary parts.
+         */
+        if (PDUSessionList) {
+            int j;
+            for (j = 0; j < PDUSessionList->list.count; j++) {
+                amf_sess_t *sess = NULL;
+                OpenAPI_n2_sm_information_t *N2SmInfo = NULL;
+                OpenAPI_n2_info_content_t *n2InfoContent = NULL;
+                OpenAPI_ref_to_binary_data_t *refToBinaryData = NULL;
+                ogs_pkbuf_t *ack_pkbuf = NULL;
+                char content_id[32];
+
+                PDUSessionItem =
+                    (NGAP_PDUSessionResourceAdmittedItem_t *)
+                        PDUSessionList->list.array[j];
+                if (!PDUSessionItem) continue;
+
+                transfer = &PDUSessionItem->
+                        handoverRequestAcknowledgeTransfer;
+                if (!transfer || !transfer->buf || transfer->size == 0)
+                    continue;
+
+                sess = amf_sess_find_by_psi(amf_ue,
+                        PDUSessionItem->pDUSessionID);
+                if (!sess) {
+                    ogs_warn("[%s] Cannot find PSI[%d] for ack transfer",
+                            amf_ue->supi,
+                            (int)PDUSessionItem->pDUSessionID);
+                    continue;
+                }
+
+                if (sendmsg.num_of_part >= OGS_SBI_MAX_NUM_OF_PART) {
+                    ogs_warn("Too many multipart parts, "
+                            "skipping PSI[%d]", sess->psi);
+                    break;
+                }
+
+                ogs_snprintf(content_id, sizeof(content_id),
+                        "n2-sm-ack-psi-%d", sess->psi);
+
+                refToBinaryData =
+                        ogs_calloc(1, sizeof(*refToBinaryData));
+                ogs_assert(refToBinaryData);
+                refToBinaryData->content_id = ogs_strdup(content_id);
+
+                n2InfoContent = ogs_calloc(1, sizeof(*n2InfoContent));
+                ogs_assert(n2InfoContent);
+                n2InfoContent->ngap_ie_type =
+                        OpenAPI_ngap_ie_type_HANDOVER_CMD;
+                n2InfoContent->ngap_data = refToBinaryData;
+
+                N2SmInfo = ogs_calloc(1, sizeof(*N2SmInfo));
+                ogs_assert(N2SmInfo);
+                N2SmInfo->pdu_session_id = sess->psi;
+                N2SmInfo->n2_info_content = n2InfoContent;
+
+                OpenAPI_list_add(
+                        UeContextCreatedData.pdu_session_list, N2SmInfo);
+
+                /* Add ack transfer as multipart binary part */
+                ack_pkbuf = ogs_pkbuf_alloc(NULL, transfer->size);
+                ogs_assert(ack_pkbuf);
+                ogs_pkbuf_put_data(ack_pkbuf,
+                        transfer->buf, transfer->size);
+
+                sendmsg.part[sendmsg.num_of_part].pkbuf = ack_pkbuf;
+                sendmsg.part[sendmsg.num_of_part].content_id =
+                        ogs_strdup(content_id);
+                sendmsg.part[sendmsg.num_of_part].content_type =
+                        (char *)OGS_SBI_CONTENT_NGAP_TYPE;
+                sendmsg.num_of_part++;
+
+                ogs_info("[%s:%d] Added ack transfer to "
+                        "CreateUEContext 201",
+                        amf_ue->supi, sess->psi);
+            }
+        }
+
         response = ogs_sbi_build_response(&sendmsg,
                 OGS_SBI_HTTP_STATUS_CREATED);
         ogs_assert(response);
@@ -3931,6 +4012,27 @@ void ngap_handle_handover_request_ack(
                 ogs_sbi_server_send_response(stream, response));
 
         ogs_pkbuf_free(container_pkbuf);
+
+        /* Free additional multipart parts (ack transfers) */
+        {
+            int pi;
+            for (pi = 1; pi < sendmsg.num_of_part; pi++) {
+                if (sendmsg.part[pi].pkbuf)
+                    ogs_pkbuf_free(sendmsg.part[pi].pkbuf);
+                if (sendmsg.part[pi].content_id)
+                    ogs_free(sendmsg.part[pi].content_id);
+            }
+        }
+
+        /* Free N2SmInformation items in pdu_session_list */
+        {
+            OpenAPI_lnode_t *node = NULL;
+            OpenAPI_list_for_each(
+                    UeContextCreatedData.pdu_session_list, node) {
+                OpenAPI_n2_sm_information_free(
+                        (OpenAPI_n2_sm_information_t *)node->data);
+            }
+        }
         OpenAPI_list_free(UeContextCreatedData.pdu_session_list);
 
         ogs_info("[HandoverRequestAck] CreateUEContext 201 sent for [%s]",

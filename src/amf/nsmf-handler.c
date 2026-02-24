@@ -779,6 +779,21 @@ int amf_nsmf_pdusession_handle_update_sm_context(
                 /* Not reached here */
                 ogs_assert_if_reached();
 
+            } else if (state ==
+                    AMF_UPDATE_SM_CONTEXT_INTER_PLMN_HANDOVER_NOTIFY) {
+
+                /* Error on UpdateSMContext(COMPLETED) for HR session.
+                 * Release the session anyway. */
+                ogs_warn("[%s:%d] UpdateSMContext(COMPLETED) failed, "
+                        "releasing session", amf_ue->supi, sess->psi);
+                if (SESSION_CONTEXT_IN_SMF(sess)) {
+                    amf_nsmf_pdusession_sm_context_param_t rel_param;
+                    memset(&rel_param, 0, sizeof(rel_param));
+                    amf_sbi_send_release_session(
+                            ran_ue, sess,
+                            AMF_RELEASE_SM_CONTEXT_NO_STATE, &rel_param);
+                }
+
             } else if (state == AMF_UPDATE_SM_CONTEXT_HANDOVER_CANCEL) {
 
                 if (AMF_SESSION_SYNC_DONE(amf_ue, state)) {
@@ -803,6 +818,27 @@ int amf_nsmf_pdusession_handle_update_sm_context(
             } else if (state == AMF_UPDATE_SM_CONTEXT_HANDOVER_NOTIFY) {
 
                 /* Nothing to do */
+
+            } else if (state ==
+                    AMF_UPDATE_SM_CONTEXT_INTER_PLMN_HANDOVER_NOTIFY) {
+                /*
+                 * Phase 1D: After receiving UpdateSMContext(COMPLETED)
+                 * response from V-SMF for HR session, release the
+                 * old V-SMF context since the handover is complete.
+                 */
+                if (SESSION_CONTEXT_IN_SMF(sess)) {
+                    amf_nsmf_pdusession_sm_context_param_t rel_param;
+                    memset(&rel_param, 0, sizeof(rel_param));
+                    rel_param.ue_location = true;
+                    rel_param.ue_timezone = true;
+                    amf_sbi_send_release_session(
+                            ran_ue, sess,
+                            AMF_RELEASE_SM_CONTEXT_NO_STATE, &rel_param);
+
+                    ogs_info("[%s:%d] Released HR session after "
+                            "hoState=COMPLETED",
+                            amf_ue->supi, sess->psi);
+                }
 
             } else if (state == AMF_REMOVE_S1_CONTEXT_BY_LO_CONNREFUSED) {
                 if (AMF_SESSION_SYNC_DONE(amf_ue, state)) {
