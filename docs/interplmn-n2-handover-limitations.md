@@ -1,30 +1,54 @@
 # Inter-PLMN N2 Handover — Implementation Limitations
 
 This document describes known limitations and design choices in the open5gs
-inter-PLMN N2 handover implementation for local breakout (LBO).
+inter-PLMN N2 handover implementation for both local breakout (LBO) and
+home-routed (HR) roaming scenarios.
 
 Reference: 3GPP TS 23.502 §4.9.1.3, TS 29.518, TS 38.413, TS 33.501.
 
-## 1. LBO Session Strategy
+## 1. Session Strategy: LBO and Home-Routed
 
-PDU sessions are **not transferred** during handover. They are released at the
-source SMF and must be re-established by the UE in the target PLMN. This
-matches TS 23.502 §4.9.1.3.2 for local breakout — the visited PLMN's sessions
-cannot be maintained when the UE moves to the home PLMN (or vice versa) since
-the UPF anchoring is PLMN-local.
+**LBO (Local Breakout):** PDU sessions with `lbo_roaming_allowed=true` are
+**not transferred** during handover. They are released at the source SMF and
+must be re-established by the UE in the target PLMN. This matches TS 23.502
+§4.9.1.3.2 for local breakout — the visited PLMN's sessions cannot be
+maintained when the UE moves to a different PLMN since the UPF anchoring is
+PLMN-local.
 
-## 2. No PDU Session Transfer in HandoverRequest
+**Home-Routed (HR):** PDU sessions with `lbo_roaming_allowed=false` **are
+transferred** during handover. The H-SMF anchor in the home PLMN remains, and
+the source AMF coordinates with the V-SMF to migrate session state to the
+target PLMN. The handover flow includes:
+- `UpdateSMContext(hoState=PREPARING)` during handover preparation
+- PDU session N2 SM Information in `CreateUEContext` to target AMF
+- `UpdateSMContext(hoState=PREPARED)` when HandoverRequestAck is received
+- `UpdateSMContext(hoState=COMPLETED)` after handover completion
+- `UpdateSMContext(hoState=CANCELLED)` on cancel or failure for rollback
 
-The `PDUSessionResourceSetupListHOReq` in the HandoverRequest NGAP message is
-empty for inter-AMF LBO handover. This is valid per TS 38.413 §9.2.1.2 but
-means the target gNB has no active data radio bearers until the UE
+Mixed sessions (some LBO, some HR) are supported — HR sessions are transferred
+while LBO sessions are released.
+
+## 2. PDU Session Transfer in HandoverRequest
+
+For **LBO** handover, the `PDUSessionResourceSetupListHOReq` in the
+HandoverRequest NGAP message is empty. This is valid per TS 38.413 §9.2.1.2
+but means the target gNB has no active data radio bearers until the UE
 re-establishes PDU sessions after handover completion.
+
+For **HR** handover, the `PDUSessionResourceSetupListHOReq` contains the
+transferred PDU sessions. Each session includes the N2 SM Information from
+the V-SMF (PDUSessionResourceSetupRequestTransfer) with UPF tunnel info.
+The target gNB sets up data radio bearers and responds with
+`PDUSessionResourceAdmittedList` containing per-session
+HandoverRequestAcknowledgeTransfer.
 
 ## 3. RANStatusTransfer Skipped
 
 No `UplinkRANStatusTransfer` / `DownlinkRANStatusTransfer` forwarding is
-performed for inter-AMF handover since there are no data radio bearers to
-transfer PDCP status for in the LBO scenario.
+performed for inter-AMF handover. For LBO this is expected (no data radio
+bearers to transfer PDCP status for). For HR, this means PDCP sequence numbers
+are not preserved across the handover, which may cause some packet loss or
+reordering during the handover transition.
 
 ## 4. No RegistrationStatusUpdate
 
@@ -63,19 +87,17 @@ AMF relies on inactivity timeout or local cleanup to remove the orphaned context
 ## 9. SEPP Routing Requirements
 
 Inter-PLMN SBI messages (CreateUEContext, N2InfoNotify, NRF discovery) are
-routed through SEPP using two complementary mechanisms:
+routed through SEPP using the 3GPP-standard FQDN-based mechanism.
 
-- **Primary (FQDN-based)**: NFs configured with 3GPP FQDNs
-  (e.g., `amf.5gc.mnc070.mcc999.3gppnetwork.org`) in their SBI server address.
-  The SCP's existing `ogs_sbi_fqdn_in_vplmn()` function detects cross-PLMN
-  targets and routes through SEPP automatically. Requires `/etc/hosts` or DNS
-  entries mapping FQDNs to IP addresses.
+NFs are configured with 3GPP FQDNs
+(e.g., `amf.5gc.mnc070.mcc999.3gppnetwork.org`) in their SBI server address.
+The SCP's existing `ogs_sbi_fqdn_in_vplmn()` function extracts MCC/MNC from
+the FQDN and detects cross-PLMN targets, routing them through SEPP
+automatically. This follows TS 29.500 §6.1.4.3 which mandates FQDN usage for
+inter-PLMN NF communication.
 
-- **Secondary (IP-based fallback)**: When NF profiles returned by NRF use IP
-  addresses instead of FQDNs, the SCP falls back to comparing the NF instance's
-  registered PLMN IDs against locally-configured serving PLMNs. A custom
-  `X-Open5gs-Target-Plmn` header is passed from SCP to SEPP for peer SEPP
-  selection.
+Requires `/etc/hosts` or DNS entries mapping 3GPP FQDNs to IP addresses in the
+test environment.
 
 ## 10. NH/NCC Security Context
 
@@ -84,3 +106,30 @@ Chaining Counter) to the target AMF via the `SeafData` in the `CreateUEContext`
 request. The target AMF initializes its security context from these values and
 derives the next NH before sending HandoverRequest. This follows TS 33.501 but
 the NCC value is limited to 3 bits (0-7) and wraps around.
+
+## 11. HR V-SMF Interaction Timing
+
+For home-routed sessions, the source AMF sends `UpdateSMContext` to the V-SMF
+at multiple points during the handover. These are serialized per session via
+the AMF's session synchronization mechanism (`AMF_SESSION_SYNC_DONE`). When
+multiple HR sessions exist, the `CreateUEContext` to the target AMF is only
+sent after ALL V-SMF responses for `HANDOVER_REQUIRED` are received, and
+`HandoverCommand` is only sent after ALL V-SMF responses for
+`HANDOVER_REQ_ACK` return `HANDOVER_CMD`.
+
+## 12. HR Session Rollback on Cancel/Failure
+
+When a handover is cancelled (source gNB sends `HandoverCancel`) or fails
+(target gNB sends `HandoverFailure` → error on `CreateUEContext`), the source
+AMF sends `UpdateSMContext(hoState=CANCELLED)` to the V-SMF for each HR
+session. The `HandoverCancelAcknowledge` or `HandoverPreparationFailure` is
+sent immediately; V-SMF rollback is fire-and-forget (asynchronous). The V-SMF
+clears its prepared handover state and removes any indirect forwarding tunnels.
+
+## 13. H-SMF Reachability During Handover
+
+The HR handover flow assumes the H-SMF in the home PLMN remains reachable
+throughout the handover. The V-SMF communicates with the H-SMF for N2 SM
+information during handover preparation. If H-SMF connectivity is lost
+mid-handover, the V-SMF's `UpdateSMContext` will fail, causing the handover
+to fail at the source AMF.
