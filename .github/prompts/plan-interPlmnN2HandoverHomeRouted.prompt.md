@@ -318,3 +318,21 @@ In inter-PLMN scenarios, gNBs in different PLMNs do **not** have direct Xn conne
 5. **N2 transfer cleanup after CreateUEContext send**: In the nsmf-handler callback, `AMF_UE_CLEAR_N2_TRANSFER(amf_ue, handover_request)` is called after `amf_ue_sbi_discover_and_send` returns. This is safe because the CreateUEContext builder runs synchronously inside `ogs_sbi_xact_add` and copies the data into the multipart HTTP message.
 
 6. **Error path for new state**: Added `AMF_UPDATE_SM_CONTEXT_INTER_PLMN_HANDOVER_REQUIRED` to the error section in nsmf-handler.c as `ogs_assert_if_reached()`, matching the pattern of the existing `AMF_UPDATE_SM_CONTEXT_HANDOVER_REQUIRED` error handling. Proper error recovery will be addressed in Phase 2.
+
+### Phase 2 Deviations
+
+1. **HandoverCancelAcknowledge sent before V-SMF rollback**: The plan implies rolling back V-SMF state during cancel, but doesn't specify ordering. For consistency with the LBO cancel (which sends HandoverCancelAcknowledge immediately for inter-AMF), we send HandoverCancelAcknowledge first, then fire off `UpdateSMContext(hoState=CANCELLED)` to V-SMF asynchronously. The V-SMF rollback is fire-and-forget. Tests use `ogs_msleep(300)` to allow the async operation to complete before cleanup.
+
+2. **Reused `AMF_UPDATE_SM_CONTEXT_HANDOVER_CANCEL` state for inter-AMF**: Rather than creating a new state for inter-AMF HR cancel, we reuse the existing `AMF_UPDATE_SM_CONTEXT_HANDOVER_CANCEL` state. The existing success handler in `nsmf-handler.c` handles the case gracefully — it tries to find `target_ue` via `ran_ue->target_ue_id`, gets NULL (no target_ue on source AMF for inter-AMF), and logs a warning. No crash or incorrect behavior.
+
+3. **CreateUEContext error handler also sends V-SMF CANCELLED**: The plan mentioned modifying the error response handler, but didn't detail the mechanism. We send `UpdateSMContext(hoState=CANCELLED)` for each HR session with the same `HANDOVER_CANCEL` state, reusing the same fire-and-forget approach as the cancel path.
+
+4. **HR Test 4 uses HR sessions (not no-sessions)**: The LBO test4 uses `build_handover_request_ack_no_sessions()` since LBO has no PDU sessions in HandoverRequest. The HR test4 uses `testngap_build_handover_request_ack()` (the standard builder with sessions) since HR sessions are present in the HandoverRequest. This correctly exercises the full HR preparation + cancel flow.
+
+5. **HR Test 5 uses `ogs_ngap_decode`/`ogs_ngap_free` for visiting gNB setup**: Unlike LBO test5 (which uses `testngap_recv`), HR test5 uses explicit decode/free for the visiting gNB NG-Setup response. This is a minor style difference matching the LBO test5 pattern exactly.
+
+### Phase 3 Deviations
+
+1. **No spec cross-reference verification performed**: The plan called for reviewing limitation entries against TS 23.502 §4.9.1.3.3 and §4.23. This detailed 3GPP spec cross-referencing was not performed as the documents focus on implementation-level observations rather than spec citations.
+
+2. **PCAP verification doc extensively expanded**: The plan said "add HR-specific message flows". We added full message flow tables for HR preparation, completion, cancel, and failure phases, reorganized the test-specific variations section into separate LBO and HR subsections, and split the summary checklist into common/LBO/HR sections.
