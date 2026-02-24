@@ -780,6 +780,7 @@ typedef struct amf_sess_s {
         ogs_pkbuf_t *path_switch_request_ack;
         ogs_pkbuf_t *handover_request;
         ogs_pkbuf_t *handover_command;
+        ogs_pkbuf_t *handover_required_from_gnb;
     } transfer;
 #define AMF_SESS_STORE_N2_TRANSFER(__sESS, __n2Type, __n2Buf) \
     do { \

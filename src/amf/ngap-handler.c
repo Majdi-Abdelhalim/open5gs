@@ -3401,12 +3401,20 @@ void ngap_handle_handover_required(
 
             /*
              * Check for home-routed sessions needing V-SMF involvement.
-             * For HR sessions, we must send UpdateSMContext(HANDOVER_REQUIRED)
-             * to the V-SMF before sending CreateUEContext to target AMF,
-             * so the H-SMF can prepare N2 SM information.
+             *
+             * Per TS 23.502 §4.23.7.3 (V-SMF insertion):
+             * When UE is at HPLMN moving to VPLMN, the source AMF sends
+             * CreateUEContext directly WITHOUT contacting any SMF.
+             * The target AMF will select a V-SMF in the visited PLMN.
+             *
+             * When UE is already roaming (V-SMF exists), the source AMF
+             * sends UpdateSMContext(HO_REQUIRED) to the existing V-SMF
+             * before CreateUEContext (future: V-SMF change/removal).
              */
             {
                 bool has_hr_sessions = false;
+                bool ue_at_home = !ogs_sbi_plmn_id_in_vplmn(
+                        &amf_ue->home_plmn_id);
 
                 for (i = 0; i < PDUSessionList->list.count; i++) {
                     amf_sess_t *sess = NULL;
@@ -3424,7 +3432,61 @@ void ngap_handle_handover_required(
                     }
                 }
 
-                if (has_hr_sessions) {
+                if (has_hr_sessions && ue_at_home) {
+                    /*
+                     * V-SMF Insertion: UE at HPLMN → VPLMN
+                     * Store gNB's HandoverRequiredTransfer per session
+                     * and fall through to CreateUEContext (no SMF contact).
+                     */
+                    ogs_info("Inter-PLMN V-SMF insertion: UE at home, "
+                            "storing gNB HandoverRequiredTransfer "
+                            "and sending CreateUEContext directly");
+
+                    for (i = 0; i < PDUSessionList->list.count; i++) {
+                        amf_sess_t *sess = NULL;
+                        ogs_pkbuf_t *transfer_buf = NULL;
+
+                        PDUSessionItem =
+                            (NGAP_PDUSessionResourceItemHORqd_t *)
+                                PDUSessionList->list.array[i];
+                        if (!PDUSessionItem) continue;
+
+                        transfer =
+                            &PDUSessionItem->handoverRequiredTransfer;
+
+                        sess = amf_sess_find_by_psi(
+                                amf_ue, PDUSessionItem->pDUSessionID);
+                        if (!sess) continue;
+
+                        if (!sess->lbo_roaming_allowed &&
+                                SESSION_CONTEXT_IN_SMF(sess)) {
+                            /* Store gNB's HandoverRequiredTransfer */
+                            transfer_buf = ogs_pkbuf_alloc(
+                                    NULL, transfer->size);
+                            ogs_assert(transfer_buf);
+                            ogs_pkbuf_put_data(transfer_buf,
+                                    transfer->buf, transfer->size);
+
+                            AMF_SESS_STORE_N2_TRANSFER(sess,
+                                    handover_required_from_gnb,
+                                    transfer_buf);
+
+                            ogs_info("[%s:%d] Stored gNB "
+                                    "HandoverRequiredTransfer "
+                                    "for V-SMF insertion",
+                                    amf_ue->supi, sess->psi);
+                        }
+                    }
+
+                    /* Fall through to CreateUEContext below */
+
+                } else if (has_hr_sessions && !ue_at_home) {
+                    /*
+                     * V-SMF Change/Removal: UE already roaming
+                     * Send UpdateSMContext(HO_REQUIRED) to existing V-SMF
+                     * before sending CreateUEContext to target AMF.
+                     * (Existing behavior, kept for future V-SMF change)
+                     */
                     ogs_info("Inter-PLMN HR: sending UpdateSMContext "
                             "for home-routed sessions before CreateUEContext");
 
@@ -3530,6 +3592,9 @@ void ngap_handle_handover_required(
                     TargetID);
             ogs_expect(r == OGS_OK);
             ogs_assert(r != OGS_ERROR);
+
+            /* Builder has copied these buffers — free originals */
+            AMF_UE_CLEAR_N2_TRANSFER(amf_ue, handover_required_from_gnb);
 
             return;
         }

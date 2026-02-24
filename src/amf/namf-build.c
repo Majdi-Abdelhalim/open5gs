@@ -272,20 +272,137 @@ ogs_sbi_request_t *amf_namf_comm_build_create_ue_context(
     message.num_of_part++;
 
     /*
-     * Populate pdu_session_list with N2SmInformation entries for HR
-     * sessions that have N2 SM info from H-SMF (collected via
-     * UpdateSMContext in Phase 1A).
+     * Populate session context for V-SMF insertion (§4.23.7.3).
      *
-     * Per TS 29.518, UeContextCreateData.pduSessionList is of type
-     * N2SmInformation (not PduSessionContext). Each entry contains
-     * n2InfoContent referencing a multipart binary part with
-     * content-id "n2-sm-psi-{psi}".
+     * When UE is at home PLMN with HR sessions moving to visited PLMN,
+     * we include PduSessionContext entries in UeContext.session_context_list
+     * with the session's SM context reference (pointing to the SMF that
+     * will become the H-SMF) and add the gNB's HandoverRequiredTransfer
+     * as multipart binary parts.
+     *
+     * The target AMF reads session_context_list to get sm_context_ref
+     * and smf_service_instance_id (H-SMF URI), then passes them to the
+     * newly selected V-SMF via CreateSMContext(PREPARING).
+     *
+     * For backward compatibility with the old HR flow (UE roaming with
+     * existing V-SMF), N2SmInformation from sess->transfer.handover_request
+     * is still used via UeContextCreateData.pdu_session_list.
      */
     {
         amf_sess_t *sess = NULL;
+        bool ue_at_home = !ogs_sbi_plmn_id_in_vplmn(
+                &amf_ue->home_plmn_id);
 
         ogs_list_for_each(&amf_ue->sess_list, sess) {
-            if (!sess->lbo_roaming_allowed &&
+            /*
+             * V-SMF Insertion path: UE at home, HR session,
+             * gNB's HandoverRequiredTransfer stored
+             */
+            if (ue_at_home &&
+                    !sess->lbo_roaming_allowed &&
+                    SESSION_CONTEXT_IN_SMF(sess) &&
+                    sess->transfer.handover_required_from_gnb) {
+
+                OpenAPI_pdu_session_context_t *PduSessionCtx = NULL;
+                OpenAPI_snssai_t *sNSSAI = NULL;
+                ogs_pkbuf_t *n2smbuf = NULL;
+                char content_id[32];
+
+                if (message.num_of_part >= OGS_SBI_MAX_NUM_OF_PART) {
+                    ogs_warn("Too many multipart parts, "
+                            "skipping PSI[%d]", sess->psi);
+                    break;
+                }
+
+                /* Build content-id for this session's N2 SM data */
+                ogs_snprintf(content_id, sizeof(content_id),
+                        "n2-sm-psi-%d", sess->psi);
+
+                /* Build PduSessionContext */
+                sNSSAI = ogs_calloc(1, sizeof(*sNSSAI));
+                ogs_assert(sNSSAI);
+                sNSSAI->sst = sess->s_nssai.sst;
+                sNSSAI->sd =
+                        ogs_s_nssai_sd_to_string(sess->s_nssai.sd);
+
+                PduSessionCtx = OpenAPI_pdu_session_context_create(
+                        sess->psi,
+                        sess->sm_context_ref ?
+                            ogs_strdup(sess->sm_context_ref) : NULL,
+                        sNSSAI,
+                        sess->dnn ? ogs_strdup(sess->dnn) : NULL,
+                        NULL, /* selected_dnn */
+                        OpenAPI_access_type_3GPP_ACCESS,
+                        0, /* additional_access_type */
+                        NULL, /* allocated_ebi_list */
+                        NULL, /* hsmf_id */
+                        NULL, /* hsmf_set_id */
+                        NULL, /* hsmf_service_set_id */
+                        0, /* smf_binding */
+                        NULL, /* vsmf_id */
+                        NULL, /* vsmf_set_id */
+                        NULL, /* vsmf_service_set_id */
+                        0, /* vsmf_binding */
+                        NULL, /* ismf_id */
+                        NULL, /* ismf_set_id */
+                        NULL, /* ismf_service_set_id */
+                        0, /* ismf_binding */
+                        NULL, /* ns_instance */
+                        sess->sm_context_resource_uri ?
+                            ogs_strdup(
+                                sess->sm_context_resource_uri) : NULL,
+                        false, 0, /* ma_pdu_session */
+                        NULL, /* cn_assisted_ran_para */
+                        NULL, /* nrf_management_uri */
+                        NULL, /* nrf_discovery_uri */
+                        NULL, /* nrf_access_token_uri */
+                        NULL, /* smf_binding_info */
+                        NULL, /* vsmf_binding_info */
+                        NULL, /* ismf_binding_info */
+                        NULL, /* additional_snssai */
+                        NULL, /* inter_plmn_api_root */
+                        NULL, /* pgw_fqdn */
+                        NULL, /* pgw_ip_addr */
+                        NULL, /* plmn_id */
+                        NULL, /* anchor_smf_supported_features */
+                        false, 0 /* anchor_smf_oauth2_required */
+                );
+                ogs_assert(PduSessionCtx);
+
+                /* Initialize session_context_list if needed */
+                if (!UeContext.session_context_list)
+                    UeContext.session_context_list =
+                            OpenAPI_list_create();
+                ogs_assert(UeContext.session_context_list);
+
+                OpenAPI_list_add(
+                        UeContext.session_context_list,
+                        PduSessionCtx);
+
+                /* Add gNB HandoverRequiredTransfer as binary part */
+                n2smbuf = ogs_pkbuf_alloc(NULL,
+                        sess->transfer.handover_required_from_gnb->len);
+                ogs_assert(n2smbuf);
+                ogs_pkbuf_put_data(n2smbuf,
+                        sess->transfer.handover_required_from_gnb->data,
+                        sess->transfer.handover_required_from_gnb->len);
+
+                message.part[message.num_of_part].pkbuf = n2smbuf;
+                message.part[message.num_of_part].content_id =
+                        ogs_strdup(content_id);
+                message.part[message.num_of_part].content_type =
+                        (char *)OGS_SBI_CONTENT_NGAP_TYPE;
+                message.num_of_part++;
+
+                ogs_info("[%s:%d] Added V-SMF insertion session to "
+                        "CreateUEContext (sm_context_ref=%s)",
+                        amf_ue->supi, sess->psi,
+                        sess->sm_context_ref ? sess->sm_context_ref : "N/A");
+
+            /*
+             * Old HR path: UE already roaming, N2 SM from existing V-SMF
+             */
+            } else if (!sess->lbo_roaming_allowed &&
                     SESSION_CONTEXT_IN_SMF(sess) &&
                     sess->transfer.handover_request) {
                 OpenAPI_n2_sm_information_t *N2SmInfo = NULL;
@@ -381,6 +498,15 @@ ogs_sbi_request_t *amf_namf_comm_build_create_ue_context(
                     (OpenAPI_n2_sm_information_t *)node->data);
         }
         OpenAPI_list_free(UeContextCreateData.pdu_session_list);
+    }
+    if (UeContext.session_context_list) {
+        OpenAPI_lnode_t *node = NULL;
+        OpenAPI_list_for_each(UeContext.session_context_list, node) {
+            OpenAPI_pdu_session_context_free(
+                    (OpenAPI_pdu_session_context_t *)node->data);
+        }
+        OpenAPI_list_free(UeContext.session_context_list);
+        UeContext.session_context_list = NULL;
     }
     amf_nsmf_pdusession_free_target_id(targetId);
     if (serving_plmn_id)

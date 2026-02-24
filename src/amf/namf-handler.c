@@ -2359,32 +2359,44 @@ int amf_namf_comm_handle_create_ue_context_response(
             ogs_assert(r != OGS_ERROR);
 
             /*
-             * Phase 2: Send UpdateSMContext(hoState=CANCELLED) to V-SMF
+             * Send UpdateSMContext(hoState=CANCELLED) to V-SMF
              * for each home-routed session to roll back handover state.
              * HandoverPreparationFailure is already sent.
+             *
+             * V-SMF insertion (UE at home): skip — no SMF was contacted,
+             * nothing to roll back at the source side.
              */
             {
                 amf_sess_t *sess = NULL;
                 amf_nsmf_pdusession_sm_context_param_t param;
+                bool ue_at_home = !ogs_sbi_plmn_id_in_vplmn(
+                        &amf_ue->home_plmn_id);
 
-                ogs_list_for_each(&amf_ue->sess_list, sess) {
-                    if (!SESSION_CONTEXT_IN_SMF(sess)) continue;
-                    if (sess->lbo_roaming_allowed) continue;
+                if (!ue_at_home) {
+                    ogs_list_for_each(&amf_ue->sess_list, sess) {
+                        if (!SESSION_CONTEXT_IN_SMF(sess)) continue;
+                        if (sess->lbo_roaming_allowed) continue;
 
-                    memset(&param, 0, sizeof(param));
-                    param.hoState = OpenAPI_ho_state_CANCELLED;
+                        memset(&param, 0, sizeof(param));
+                        param.hoState = OpenAPI_ho_state_CANCELLED;
 
-                    r = amf_sess_sbi_discover_and_send(
-                            OGS_SBI_SERVICE_TYPE_NSMF_PDUSESSION, NULL,
-                            amf_nsmf_pdusession_build_update_sm_context,
-                            source_ue, sess,
-                            AMF_UPDATE_SM_CONTEXT_HANDOVER_CANCEL, &param);
-                    ogs_expect(r == OGS_OK);
-                    ogs_assert(r != OGS_ERROR);
+                        r = amf_sess_sbi_discover_and_send(
+                                OGS_SBI_SERVICE_TYPE_NSMF_PDUSESSION, NULL,
+                                amf_nsmf_pdusession_build_update_sm_context,
+                                source_ue, sess,
+                                AMF_UPDATE_SM_CONTEXT_HANDOVER_CANCEL,
+                                &param);
+                        ogs_expect(r == OGS_OK);
+                        ogs_assert(r != OGS_ERROR);
 
-                    ogs_info("[%s:%d] Sent UpdateSMContext(CANCELLED) "
-                            "to V-SMF for HR failure rollback",
-                            amf_ue->supi, sess->psi);
+                        ogs_info("[%s:%d] Sent UpdateSMContext(CANCELLED) "
+                                "to V-SMF for HR failure rollback",
+                                amf_ue->supi, sess->psi);
+                    }
+                } else {
+                    ogs_info("[%s] V-SMF insertion: skipping "
+                            "UpdateSMContext(CANCELLED) at source",
+                            amf_ue->supi);
                 }
             }
         }
@@ -2421,19 +2433,32 @@ int amf_namf_comm_handle_create_ue_context_response(
     memcpy(amf_ue->handover.container.buf, n2buf->data, n2buf->len);
 
     /*
-     * Phase 1C: Extract per-session HandoverRequestAckTransfer from
-     * the 201 response and send UpdateSMContext(HANDOVER_REQ_ACK) to
-     * V-SMF for each HR session. The V-SMF responds with HANDOVER_CMD,
-     * and when all responses arrive, HandoverCommand is sent to source gNB.
+     * Handle per-session N2 SM from the 201 response.
      *
-     * For LBO-only handovers (no pdu_session_list or empty list),
-     * send HandoverCommand immediately (existing behavior).
+     * V-SMF Insertion (UE at home, HR sessions):
+     *   The source AMF does NOT contact any SMF. The V-SMF at the target
+     *   PLMN handles everything. Send HandoverCommand immediately.
+     *
+     * Old HR path (UE roaming, V-SMF exists):
+     *   Send UpdateSMContext(HANDOVER_REQ_ACK) to V-SMF for each HR
+     *   session. Wait for all HANDOVER_CMD responses before sending
+     *   HandoverCommand.
+     *
+     * LBO-only (no HR sessions):
+     *   Send HandoverCommand immediately.
      */
     {
         bool hr_sessions_pending = false;
+        bool ue_at_home = !ogs_sbi_plmn_id_in_vplmn(
+                &amf_ue->home_plmn_id);
 
-        if (CreatedData->pdu_session_list &&
+        if (!ue_at_home &&
+                CreatedData->pdu_session_list &&
                 CreatedData->pdu_session_list->count > 0) {
+            /*
+             * Old HR path: UE roaming with existing V-SMF.
+             * Send UpdateSMContext(HANDOVER_REQ_ACK) to V-SMF.
+             */
             OpenAPI_lnode_t *node = NULL;
 
             source_ue = ran_ue_find_by_id(amf_ue->ran_ue_id);
@@ -2507,7 +2532,7 @@ int amf_namf_comm_handle_create_ue_context_response(
         }
 
         if (!hr_sessions_pending) {
-            /* LBO-only: send HandoverCommand immediately */
+            /* LBO-only or V-SMF insertion: send HandoverCommand immediately */
             r = ngap_send_handover_command(amf_ue);
             if (r != OGS_OK) {
                 ogs_error("[%s] ngap_send_handover_command() failed",
@@ -2623,21 +2648,27 @@ int amf_namf_comm_handle_n2_info_notify(
 
     /* Release all PDU sessions at the source SMF(s)
      *
-     * Phase 1D: For HR sessions, send UpdateSMContext(hoState=COMPLETED)
-     * to the V-SMF first to notify H-SMF of handover completion.
+     * For HR sessions (UE roaming, V-SMF change): send
+     * UpdateSMContext(hoState=COMPLETED) to V-SMF first.
      * The session will be released in the nsmf response handler.
+     *
+     * For V-SMF insertion (UE at home): no V-SMF was contacted
+     * at the source, so release directly like LBO.
+     *
      * For LBO sessions, release directly (existing behavior).
      */
     ran_ue = ran_ue_find_by_id(amf_ue->ran_ue_id);
     {
         amf_sess_t *sess = NULL;
         bool hr_sessions_pending = false;
+        bool ue_at_home = !ogs_sbi_plmn_id_in_vplmn(
+                &amf_ue->home_plmn_id);
 
         ogs_list_for_each(&amf_ue->sess_list, sess) {
             if (!SESSION_CONTEXT_IN_SMF(sess)) continue;
 
-            if (!sess->lbo_roaming_allowed) {
-                /* HR: send UpdateSMContext(hoState=COMPLETED) */
+            if (!sess->lbo_roaming_allowed && !ue_at_home) {
+                /* V-SMF change: send UpdateSMContext(hoState=COMPLETED) */
                 amf_nsmf_pdusession_sm_context_param_t sm_param;
                 memset(&sm_param, 0, sizeof(sm_param));
                 sm_param.hoState = OpenAPI_ho_state_COMPLETED;
@@ -2656,18 +2687,24 @@ int amf_namf_comm_handle_n2_info_notify(
                 ogs_info("[%s:%d] Sent UpdateSMContext(COMPLETED) "
                         "to V-SMF", amf_ue->supi, sess->psi);
             } else {
-                /* LBO: release directly */
+                /* LBO or V-SMF insertion: release directly */
                 memset(&param, 0, sizeof(param));
                 param.ue_location = true;
                 param.ue_timezone = true;
                 amf_sbi_send_release_session(
                         ran_ue, sess,
                         AMF_RELEASE_SM_CONTEXT_NO_STATE, &param);
+
+                if (!sess->lbo_roaming_allowed && ue_at_home) {
+                    ogs_info("[%s:%d] V-SMF insertion: releasing HR "
+                            "session directly at source",
+                            amf_ue->supi, sess->psi);
+                }
             }
         }
 
         if (!hr_sessions_pending) {
-            /* Pure LBO: no HR sessions, nothing else to do */
+            /* Pure LBO or V-SMF insertion: no V-SMF to notify */
         }
     }
 
