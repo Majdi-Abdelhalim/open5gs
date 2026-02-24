@@ -68,37 +68,52 @@ bool smf_nsmf_handle_create_sm_context(
         return false;
     }
 
-    n1SmMsg = SmContextCreateData->n1_sm_msg;
-    if (!n1SmMsg || !n1SmMsg->content_id) {
-        ogs_error("[%s:%d] No n1SmMsg", smf_ue->supi, sess->psi);
-        smf_sbi_send_sm_context_create_error(stream,
-                OGS_SBI_HTTP_STATUS_BAD_REQUEST, OGS_SBI_APP_ERRNO_NULL,
-                "No n1SmMsg", smf_ue->supi, NULL);
-        return false;
+    /*
+     * Handover preparation (V-SMF insertion per TS 23.502 §4.23.7):
+     * hoState=PREPARING means the AMF is inserting a V-SMF during
+     * inter-PLMN N2 handover. There is no N1 NAS message — only N2 SM.
+     */
+    if (SmContextCreateData->ho_state == OpenAPI_ho_state_PREPARING) {
+        ogs_info("[%s:%d] CreateSMContext hoState=PREPARING (V-SMF insertion)",
+                smf_ue->supi, sess->psi);
+        sess->ho_state_preparing = true;
+        sess->ho_deferred_stream_id = ogs_sbi_id_from_stream(stream);
     }
 
-    n1smbuf = ogs_sbi_find_part_by_content_id(message, n1SmMsg->content_id);
-    if (!n1smbuf) {
-        ogs_error("[%s:%d] No N1 SM Content [%s]",
-                smf_ue->supi, sess->psi, n1SmMsg->content_id);
-        smf_sbi_send_sm_context_create_error(stream,
-                OGS_SBI_HTTP_STATUS_BAD_REQUEST, OGS_SBI_APP_ERRNO_NULL,
-                "No N1 SM Content", smf_ue->supi, NULL);
-        return false;
-    }
+    if (!sess->ho_state_preparing) {
+        n1SmMsg = SmContextCreateData->n1_sm_msg;
+        if (!n1SmMsg || !n1SmMsg->content_id) {
+            ogs_error("[%s:%d] No n1SmMsg", smf_ue->supi, sess->psi);
+            smf_sbi_send_sm_context_create_error(stream,
+                    OGS_SBI_HTTP_STATUS_BAD_REQUEST, OGS_SBI_APP_ERRNO_NULL,
+                    "No n1SmMsg", smf_ue->supi, NULL);
+            return false;
+        }
 
-    gsm_header = (ogs_nas_5gsm_header_t *)n1smbuf->data;
-    ogs_assert(gsm_header);
+        n1smbuf = ogs_sbi_find_part_by_content_id(
+                message, n1SmMsg->content_id);
+        if (!n1smbuf) {
+            ogs_error("[%s:%d] No N1 SM Content [%s]",
+                    smf_ue->supi, sess->psi, n1SmMsg->content_id);
+            smf_sbi_send_sm_context_create_error(stream,
+                    OGS_SBI_HTTP_STATUS_BAD_REQUEST, OGS_SBI_APP_ERRNO_NULL,
+                    "No N1 SM Content", smf_ue->supi, NULL);
+            return false;
+        }
 
-    sess->pti = gsm_header->procedure_transaction_identity;
-    if (sess->pti == OGS_NAS_PROCEDURE_TRANSACTION_IDENTITY_UNASSIGNED) {
-        ogs_error("[%s:%d] No PTI", smf_ue->supi, sess->psi);
-        smf_sbi_send_sm_context_create_error(stream,
-                OGS_SBI_HTTP_STATUS_BAD_REQUEST, OGS_SBI_APP_ERRNO_NULL,
-                "No PTI", smf_ue->supi, NULL);
-        return false;
+        gsm_header = (ogs_nas_5gsm_header_t *)n1smbuf->data;
+        ogs_assert(gsm_header);
 
-    }
+        sess->pti = gsm_header->procedure_transaction_identity;
+        if (sess->pti == OGS_NAS_PROCEDURE_TRANSACTION_IDENTITY_UNASSIGNED) {
+            ogs_error("[%s:%d] No PTI", smf_ue->supi, sess->psi);
+            smf_sbi_send_sm_context_create_error(stream,
+                    OGS_SBI_HTTP_STATUS_BAD_REQUEST, OGS_SBI_APP_ERRNO_NULL,
+                    "No PTI", smf_ue->supi, NULL);
+            return false;
+
+        }
+    } /* end of !ho_state_preparing N1 SM processing */
 
     if (!SmContextCreateData->dnn) {
         ogs_error("[%s:%d] No DNN", smf_ue->supi, sess->psi);
@@ -480,11 +495,21 @@ bool smf_nsmf_handle_create_sm_context(
      * Send PFCP Session Establiashment Request to the UPF
      ***********************************************************************/
 
-    /*********************************************************************
-     * If Home-Routed Roaming,
-     * Send HTTP_STATUS_CREATED(/nsmf-pdusession/v1/sm-context) to the AMF
-     *********************************************************************/
-    smf_sbi_send_sm_context_created_data(sess, stream);
+    if (!sess->ho_state_preparing) {
+        /*****************************************************************
+         * Normal HR registration:
+         * Send HTTP_STATUS_CREATED immediately, then async flow continues
+         *****************************************************************/
+        smf_sbi_send_sm_context_created_data(sess, stream);
+    } else {
+        /*****************************************************************
+         * HO PREPARING (V-SMF insertion per TS 23.502 §4.23.7):
+         * Defer 201 response until V-UPF N4 session is established,
+         * so we can include the V-UPF N3 F-TEID in the response.
+         *****************************************************************/
+        ogs_info("[%s:%d] V-SMF HR HO: deferring 201 until N4 established",
+                smf_ue->supi, sess->psi);
+    }
 
     /* Select UPF based on UE Location Information */
     smf_sess_select_upf(sess);
@@ -508,6 +533,24 @@ bool smf_nsmf_handle_create_sm_context(
     /* Setup Visited CN Tunnel */
     qos_flow = smf_vcn_tunnel_add(sess);
     ogs_assert(qos_flow);
+
+    /*
+     * HO PREPARING: Set default QoS on the VCN tunnel QoS flow.
+     * In normal HR registration, QoS comes from H-SMF later.
+     * For HO, we use default values (QFI=1, 5QI=9) so we can build
+     * the HandoverRequestTransfer immediately after N4 establishment.
+     * Also set default session type (IPv4) since H-SMF is not contacted.
+     */
+    if (sess->ho_state_preparing) {
+        qos_flow->qfi = 1;
+        qos_flow->qos.index = 9;   /* 5QI = 9 (default internet) */
+        qos_flow->qos.arp.priority_level = 8;
+        qos_flow->qos.arp.pre_emption_capability =
+                OGS_5GC_PRE_EMPTION_DISABLED;
+        qos_flow->qos.arp.pre_emption_vulnerability =
+                OGS_5GC_PRE_EMPTION_ENABLED;
+        sess->session.session_type = OGS_PDU_SESSION_TYPE_IPV4;
+    }
 
     /* Setup PDR */
     dl_pdr = qos_flow->dl_pdr;
@@ -601,10 +644,12 @@ bool smf_nsmf_handle_create_sm_context(
     dl_pdr->precedence = OGS_PFCP_DEFAULT_PDR_PRECEDENCE;
     ul_pdr->precedence = OGS_PFCP_DEFAULT_PDR_PRECEDENCE;
 
-    /* Save N1 SM Message and send it to H-SMF */
-    if (sess->n1SmBufFromUe) ogs_pkbuf_free(sess->n1SmBufFromUe);
-    sess->n1SmBufFromUe = ogs_pkbuf_copy(n1smbuf);
-    ogs_assert(sess->n1SmBufFromUe);
+    if (!sess->ho_state_preparing) {
+        /* Save N1 SM Message and send it to H-SMF */
+        if (sess->n1SmBufFromUe) ogs_pkbuf_free(sess->n1SmBufFromUe);
+        sess->n1SmBufFromUe = ogs_pkbuf_copy(n1smbuf);
+        ogs_assert(sess->n1SmBufFromUe);
+    }
 
     ogs_assert(OGS_OK ==
             smf_5gc_pfcp_send_session_establishment_request(sess, NULL, 0));

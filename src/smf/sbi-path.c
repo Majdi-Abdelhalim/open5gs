@@ -356,6 +356,83 @@ void smf_sbi_send_sm_context_created_data(
     ogs_free(sendmsg.http.location);
 }
 
+void smf_sbi_send_sm_context_created_data_ho_preparing(smf_sess_t *sess)
+{
+    OpenAPI_sm_context_created_data_t SmContextCreatedData;
+    OpenAPI_ref_to_binary_data_t n2SmInfo;
+
+    ogs_sbi_server_t *server = NULL;
+    ogs_sbi_header_t header;
+    ogs_sbi_message_t sendmsg;
+    ogs_sbi_response_t *response = NULL;
+    ogs_sbi_stream_t *stream = NULL;
+    ogs_pkbuf_t *n2smbuf = NULL;
+
+    ogs_assert(sess);
+
+    stream = ogs_sbi_stream_find_by_id(sess->ho_deferred_stream_id);
+    if (!stream) {
+        ogs_error("[%d] HO PREPARING: deferred stream not found", sess->psi);
+        return;
+    }
+
+    /*
+     * Build N2 SM: PDUSessionResourceSetupRequestTransfer
+     * Contains V-UPF N3 F-TEID and QoS flow parameters for target gNB
+     */
+    n2smbuf = ngap_build_pdu_session_resource_setup_request_transfer(sess);
+    if (!n2smbuf) {
+        ogs_error("[%d] HO PREPARING: failed to build N2 SM", sess->psi);
+        return;
+    }
+
+    memset(&SmContextCreatedData, 0, sizeof(SmContextCreatedData));
+    SmContextCreatedData.ho_state = OpenAPI_ho_state_PREPARING;
+
+    memset(&n2SmInfo, 0, sizeof(n2SmInfo));
+    n2SmInfo.content_id = (char *)OGS_SBI_CONTENT_NGAP_SM_ID;
+    SmContextCreatedData.n2_sm_info = &n2SmInfo;
+    SmContextCreatedData.n2_sm_info_type =
+            OpenAPI_n2_sm_info_type_PDU_RES_SETUP_REQ;
+
+    memset(&sendmsg, 0, sizeof(sendmsg));
+
+    memset(&header, 0, sizeof(header));
+    header.service.name = (char *)OGS_SBI_SERVICE_NAME_NSMF_PDUSESSION;
+    header.api.version = (char *)OGS_SBI_API_V1;
+    header.resource.component[0] =
+        (char *)OGS_SBI_RESOURCE_NAME_SM_CONTEXTS;
+    header.resource.component[1] = sess->sm_context_ref;
+
+    server = ogs_sbi_server_from_stream(stream);
+    ogs_assert(server);
+    sendmsg.http.location = ogs_sbi_server_uri(server, &header);
+    ogs_assert(sendmsg.http.location);
+
+    sendmsg.SmContextCreatedData = &SmContextCreatedData;
+
+    /* N2 SM binary part */
+    sendmsg.part[0].content_id = (char *)OGS_SBI_CONTENT_NGAP_SM_ID;
+    sendmsg.part[0].content_type = (char *)OGS_SBI_CONTENT_NGAP_TYPE;
+    sendmsg.part[0].pkbuf = n2smbuf;
+    sendmsg.num_of_part = 1;
+
+    response = ogs_sbi_build_response(&sendmsg, OGS_SBI_HTTP_STATUS_CREATED);
+    ogs_assert(response);
+    ogs_assert(true == ogs_sbi_server_send_response(stream, response));
+
+    ogs_info("[%d] V-SMF HO PREPARING: sent 201 with N2 SM "
+            "(HandoverRequestTransfer)", sess->psi);
+
+    smf_metrics_inst_by_slice_add(&sess->serving_plmn_id, &sess->s_nssai,
+            SMF_METR_CTR_SM_PDUSESSIONCREATIONSUCC, 1);
+
+    ogs_free(sendmsg.http.location);
+    ogs_pkbuf_free(n2smbuf);
+
+    sess->ho_deferred_stream_id = OGS_INVALID_POOL_ID;
+}
+
 void smf_sbi_send_sm_context_create_error(
         ogs_sbi_stream_t *stream,
         int status, ogs_sbi_app_errno_e err,

@@ -810,12 +810,27 @@ void smf_gsm_state_wait_pfcp_establishment(ogs_fsm_t *s, smf_event_t *e)
                     return;
                 }
                 if (HOME_ROUTED_ROAMING_IN_VSMF(sess)) {
-                    r = smf_sbi_discover_and_send(
-                            OGS_SBI_SERVICE_TYPE_NSMF_PDUSESSION, NULL,
-                            smf_nsmf_pdusession_build_create_data,
-                            sess, NULL, 0, NULL);
-                    ogs_expect(r == OGS_OK);
-                    ogs_assert(r != OGS_ERROR);
+                    if (sess->ho_state_preparing) {
+                        /*
+                         * V-SMF insertion HO (TS 23.502 §4.23.7):
+                         * V-UPF N4 session established. Build N2 SM
+                         * (HandoverRequestTransfer with V-UPF N3 F-TEID)
+                         * and send deferred 201 response to AMF.
+                         * H-SMF contact is deferred to post-HO phase.
+                         */
+                        ogs_info("[%d] V-SMF HO: N4 established, "
+                                "sending deferred 201 with N2 SM",
+                                sess->psi);
+                        smf_sbi_send_sm_context_created_data_ho_preparing(
+                                sess);
+                    } else {
+                        r = smf_sbi_discover_and_send(
+                                OGS_SBI_SERVICE_TYPE_NSMF_PDUSESSION, NULL,
+                                smf_nsmf_pdusession_build_create_data,
+                                sess, NULL, 0, NULL);
+                        ogs_expect(r == OGS_OK);
+                        ogs_assert(r != OGS_ERROR);
+                    }
                 } else if (HOME_ROUTED_ROAMING_IN_HSMF(sess)) {
                     r = smf_sbi_discover_and_send(
                             OGS_SBI_SERVICE_TYPE_NUDM_UECM, NULL,

@@ -711,6 +711,14 @@ typedef struct smf_sess_s {
     bool establishment_accept_sent;
     ogs_sbi_xact_t *pending_modification_xact;
 
+/*
+ * Handover preparation state (V-SMF insertion per TS 23.502 §4.23.7)
+ * When V-SMF receives Nsmf_PDUSession_CreateSMContext with hoState=PREPARING,
+ * it defers the 201 response until V-UPF N4 session is established.
+ */
+    bool ho_state_preparing;
+    ogs_pool_id_t ho_deferred_stream_id;
+
 } smf_sess_t;
 
 void smf_context_init(void);

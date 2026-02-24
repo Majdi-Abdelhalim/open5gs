@@ -286,7 +286,13 @@ ogs_pkbuf_t *ngap_build_pdu_session_resource_setup_request_transfer(
 
     QosFlowSetupRequestList = &ie->value.choice.QosFlowSetupRequestList;
 
-    if (HOME_ROUTED_ROAMING_IN_VSMF(sess)) {
+    /*
+     * For HR V-SMF with H-SMF QoS available: use H-SMF-provided QoS flows.
+     * Otherwise (non-HR, or HO PREPARING without H-SMF contact): use local
+     * bearer_list QoS flows.
+     */
+    if (HOME_ROUTED_ROAMING_IN_VSMF(sess) &&
+            sess->h_smf_qos_flows_setup_list) {
         OpenAPI_list_t *qosFlowsSetupList = NULL;
         OpenAPI_qos_flow_setup_item_t *qosFlowSetupItem = NULL;
         OpenAPI_qos_flow_profile_t *qosFlowProfile = NULL;

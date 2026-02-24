@@ -137,6 +137,7 @@ void smf_namf_comm_send_n1_n2_pdu_establishment_reject(
 
 void smf_sbi_send_sm_context_created_data(
         smf_sess_t *sess, ogs_sbi_stream_t *stream);
+void smf_sbi_send_sm_context_created_data_ho_preparing(smf_sess_t *sess);
 void smf_sbi_send_sm_context_create_error(
         ogs_sbi_stream_t *stream,
         int status, ogs_sbi_app_errno_e err,
