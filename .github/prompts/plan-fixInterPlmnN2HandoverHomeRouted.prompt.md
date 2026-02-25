@@ -644,3 +644,25 @@ sleep 3
 4. **New state `AMF_UPDATE_SM_CONTEXT_INTER_PLMN_HANDOVER_PREPARED = 32`**: Added in
    `sbi-path.h`. Error handling sends 500 error on the deferred CreateUEContext stream
    if any V-SMF PREPARED response fails.
+
+**Phase 7 Deviations (recorded 2025-02-25):**
+
+1. **V-SMF/H-SMF COMPLETED handler already existed**: The existing COMPLETED handler
+   in `smf/nsmf-handler.c` already handles N2_HANDOVER with HOME_ROUTED_ROAMING flags,
+   so no SMF code changes were needed for the V-SMF→H-SMF update path. Only the AMF
+   needed new code to trigger UpdateSMContext(COMPLETED) for HR sessions.
+
+2. **H-SMF state machine exception fixed**: Phase 5's `smf_nsmf_handle_create_data_in_hsmf_ho()`
+   had an unconditional `OGS_FSM_TRAN(s, smf_gsm_state_exception)` fall-through after
+   successful HO handling in `gsm-sm.c`. Fixed by adding transition to exception only
+   on failure, keeping operational state on success.
+
+3. **Source AMF: skip H-SMF release for V-SMF insertion sessions**: During
+   HandoverNotify at S-AMF (namf-handler.c), for V-SMF insertion sessions the S-AMF
+   now uses `CLEAR_SESSION_CONTEXT(sess)` instead of `amf_sbi_send_release_session()`
+   since the H-SMF session is now managed by the new V-SMF at the target PLMN.
+
+4. **New state `AMF_UPDATE_SM_CONTEXT_INTER_PLMN_HANDOVER_COMPLETED_AT_TARGET = 35`**:
+   Added in `sbi-path.h` for the T-AMF's V-SMF COMPLETED response handling. Error
+   handler just logs a warning (handover is already committed at this point).
+

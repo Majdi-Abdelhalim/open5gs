@@ -1096,6 +1096,18 @@ int amf_nsmf_pdusession_handle_update_sm_context(
                             AMF_RELEASE_SM_CONTEXT_NO_STATE, &rel_param);
                 }
 
+            } else if (state ==
+                AMF_UPDATE_SM_CONTEXT_INTER_PLMN_HANDOVER_COMPLETED_AT_TARGET) {
+
+                /* Error on V-SMF COMPLETED at target AMF.
+                 * Data path may not have switched but the handover
+                 * is already committed - just log the error.
+                 * Do NOT send error indication to gNB. */
+                ogs_warn("[%s:%d] V-SMF COMPLETED failed at T-AMF",
+                        amf_ue->supi, sess->psi);
+
+                return OGS_OK;
+
             } else if (state == AMF_UPDATE_SM_CONTEXT_HANDOVER_CANCEL) {
 
                 if (AMF_SESSION_SYNC_DONE(amf_ue, state)) {
@@ -1141,6 +1153,17 @@ int amf_nsmf_pdusession_handle_update_sm_context(
                             "hoState=COMPLETED",
                             amf_ue->supi, sess->psi);
                 }
+
+            } else if (state ==
+                AMF_UPDATE_SM_CONTEXT_INTER_PLMN_HANDOVER_COMPLETED_AT_TARGET) {
+                /*
+                 * Phase 7: T-AMF received V-SMF COMPLETED response.
+                 * V-UPF DL FAR has been updated to target gNB.
+                 * Nothing more to do at T-AMF.
+                 */
+                ogs_info("[%s:%d] V-SMF COMPLETED response received "
+                        "(data path switched)",
+                        amf_ue->supi, sess->psi);
 
             } else if (state == AMF_REMOVE_S1_CONTEXT_BY_LO_CONNREFUSED) {
                 if (AMF_SESSION_SYNC_DONE(amf_ue, state)) {

@@ -1420,7 +1420,10 @@ void smf_gsm_state_operational(ogs_fsm_t *s, smf_event_t *e)
                             ogs_error(
                                 "smf_nsmf_handle_create_data_in_hsmf_ho() "
                                 "failed");
+                            OGS_FSM_TRAN(s, smf_gsm_state_exception);
                         }
+                        /* Stay in operational state after successful
+                         * V-SMF insertion at H-SMF */
                     } else {
                         ogs_error("Invalid resource name [%s]",
                                     sbi_message->h.resource.component[2]);
@@ -1431,7 +1434,6 @@ void smf_gsm_state_operational(ogs_fsm_t *s, smf_event_t *e)
                                 sbi_message->h.resource.component[2], NULL));
                         OGS_FSM_TRAN(s, smf_gsm_state_exception);
                     }
-                    OGS_FSM_TRAN(s, smf_gsm_state_exception);
                 END
                 break;
 

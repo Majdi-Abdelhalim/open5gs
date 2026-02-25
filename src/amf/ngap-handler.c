@@ -4922,6 +4922,40 @@ void ngap_handle_handover_notification(
                     amf_ue->supi);
         }
 
+        /*
+         * Phase 7: Send UpdateSMContext(hoState=COMPLETED) to V-SMF
+         * for each HR session to trigger data path switch at V-UPF.
+         *
+         * The V-SMF COMPLETED handler updates V-UPF DL FAR to point
+         * to the target gNB's N3 F-TEID (stored during PREPARED),
+         * completing the end-to-end data path:
+         *   DN → PSA UPF → (N9) → V-UPF → (N3) → target gNB
+         */
+        {
+            amf_sess_t *sess = NULL;
+            ogs_list_for_each(&amf_ue->sess_list, sess) {
+                amf_nsmf_pdusession_sm_context_param_t param;
+
+                if (!SESSION_CONTEXT_IN_SMF(sess))
+                    continue;
+
+                memset(&param, 0, sizeof(param));
+                param.hoState = OpenAPI_ho_state_COMPLETED;
+
+                r = amf_sess_sbi_discover_and_send(
+                        OGS_SBI_SERVICE_TYPE_NSMF_PDUSESSION, NULL,
+                        amf_nsmf_pdusession_build_update_sm_context,
+                        target_ue, sess,
+                    AMF_UPDATE_SM_CONTEXT_INTER_PLMN_HANDOVER_COMPLETED_AT_TARGET,
+                        &param);
+                ogs_expect(r == OGS_OK);
+                ogs_assert(r != OGS_ERROR);
+
+                ogs_info("[%s:%d] Sent UpdateSMContext(COMPLETED) to V-SMF",
+                        amf_ue->supi, sess->psi);
+            }
+        }
+
         return;
     }
 

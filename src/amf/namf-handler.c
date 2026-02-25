@@ -2979,18 +2979,26 @@ ran_status_respond:
                 ogs_info("[%s:%d] Sent UpdateSMContext(COMPLETED) "
                         "to V-SMF", amf_ue->supi, sess->psi);
             } else {
-                /* LBO or V-SMF insertion: release directly */
-                memset(&param, 0, sizeof(param));
-                param.ue_location = true;
-                param.ue_timezone = true;
-                amf_sbi_send_release_session(
-                        ran_ue, sess,
-                        AMF_RELEASE_SM_CONTEXT_NO_STATE, &param);
-
                 if (!sess->lbo_roaming_allowed && ue_at_home) {
-                    ogs_info("[%s:%d] V-SMF insertion: releasing HR "
-                            "session directly at source",
+                    /*
+                     * V-SMF insertion: The H-SMF session is now managed
+                     * by the new V-SMF at the target PLMN. Do NOT send
+                     * release to H-SMF — the V-SMF will manage its
+                     * lifecycle. Just clear the SM context so the
+                     * session won't be released again during UE cleanup.
+                     */
+                    ogs_info("[%s:%d] V-SMF insertion: skip H-SMF release "
+                            "(V-SMF now manages H-SMF session)",
                             amf_ue->supi, sess->psi);
+                    CLEAR_SESSION_CONTEXT(sess);
+                } else {
+                    /* LBO: release directly */
+                    memset(&param, 0, sizeof(param));
+                    param.ue_location = true;
+                    param.ue_timezone = true;
+                    amf_sbi_send_release_session(
+                            ran_ue, sess,
+                            AMF_RELEASE_SM_CONTEXT_NO_STATE, &param);
                 }
             }
         }
