@@ -351,9 +351,7 @@ ogs_sbi_request_t *amf_namf_comm_build_create_ue_context(
                         NULL, /* ismf_service_set_id */
                         0, /* ismf_binding */
                         NULL, /* ns_instance */
-                        sess->sm_context_resource_uri ?
-                            ogs_strdup(
-                                sess->sm_context_resource_uri) : NULL,
+                        NULL, /* smf_service_instance_id - set below */
                         false, 0, /* ma_pdu_session */
                         NULL, /* cn_assisted_ran_para */
                         NULL, /* nrf_management_uri */
@@ -371,6 +369,55 @@ ogs_sbi_request_t *amf_namf_comm_build_create_ue_context(
                         false, 0 /* anchor_smf_oauth2_required */
                 );
                 ogs_assert(PduSessionCtx);
+
+                /*
+                 * Set smf_service_instance_id to the H-SMF's /pdu-sessions
+                 * endpoint URL. The sm_context_resource_uri points to
+                 * <apiroot>/nsmf-pdusession/v1/sm-contexts/<ref>. We need to
+                 * extract the apiroot and construct the pdu-sessions URL
+                 * so the V-SMF can POST PduSessionCreateData to the H-SMF.
+                 */
+                if (sess->sm_context_resource_uri) {
+                    ogs_sbi_header_t parsed;
+                    ogs_sbi_message_t parsed_msg;
+                    char *apiroot = NULL;
+
+                    memset(&parsed, 0, sizeof(parsed));
+                    parsed.uri = sess->sm_context_resource_uri;
+                    if (ogs_sbi_parse_header(&parsed_msg, &parsed) == OGS_OK) {
+                        bool rc2;
+                        OpenAPI_uri_scheme_e sc;
+                        char *fn = NULL;
+                        uint16_t fp = 0;
+                        ogs_sockaddr_t *a4 = NULL, *a6 = NULL;
+                        ogs_sbi_client_t *cl = NULL;
+
+                        rc2 = ogs_sbi_getaddr_from_uri(
+                                &sc, &fn, &fp, &a4, &a6,
+                                sess->sm_context_resource_uri);
+                        if (rc2 && sc != OpenAPI_uri_scheme_NULL) {
+                            cl = ogs_sbi_client_find(sc, fn, fp, a4, a6);
+                            if (!cl)
+                                cl = ogs_sbi_client_add(sc, fn, fp, a4, a6);
+                            if (cl) {
+                                apiroot = ogs_sbi_client_apiroot(cl);
+                            }
+                        }
+                        if (fn) ogs_free(fn);
+                        ogs_freeaddrinfo(a4);
+                        ogs_freeaddrinfo(a6);
+                        ogs_sbi_header_free(&parsed);
+                    }
+
+                    if (apiroot) {
+                        PduSessionCtx->smf_service_instance_id =
+                            ogs_msprintf("%s/%s/%s/%s", apiroot,
+                                (char *)OGS_SBI_SERVICE_NAME_NSMF_PDUSESSION,
+                                (char *)OGS_SBI_API_V1,
+                                (char *)OGS_SBI_RESOURCE_NAME_PDU_SESSIONS);
+                        ogs_free(apiroot);
+                    }
+                }
 
                 /* Initialize session_context_list if needed */
                 if (!UeContext.session_context_list)

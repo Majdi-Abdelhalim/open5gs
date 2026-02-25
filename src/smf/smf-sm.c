@@ -629,20 +629,62 @@ void smf_state_operational(ogs_fsm_t *s, smf_event_t *e)
                         break;
 
                     DEFAULT
-                        sess = smf_sess_add_by_pdu_session(&sbi_message);
-                        if (!sess) {
-                            ogs_error("smf_sess_add_by_sbi_message() failed");
-                            smf_sbi_send_pdu_session_create_error(stream,
-                                OGS_SBI_HTTP_STATUS_BAD_REQUEST,
-                                OGS_SBI_APP_ERRNO_NULL,
-                                OGS_5GSM_CAUSE_INVALID_MANDATORY_INFORMATION,
-                                "smf_sess_add_by_sbi_message() failed",
-                                NULL, NULL);
-                            break;
-                        }
+                        if (sbi_message.PduSessionCreateData &&
+                            sbi_message.PduSessionCreateData->
+                                is_ho_preparation_indication &&
+                            sbi_message.PduSessionCreateData->
+                                ho_preparation_indication) {
+                            /*
+                             * H-SMF: V-SMF insertion during handover.
+                             * Find EXISTING session by SUPI + PSI instead
+                             * of creating new.
+                             */
+                            smf_ue_t *ho_smf_ue = NULL;
 
-                        smf_metrics_inst_by_slice_add(NULL, NULL,
-                                SMF_METR_CTR_SM_PDUSESSIONCREATIONREQ, 1);
+                            if (sbi_message.PduSessionCreateData->supi)
+                                ho_smf_ue = smf_ue_find_by_supi(
+                                    sbi_message.PduSessionCreateData->supi);
+                            if (ho_smf_ue) {
+                                sess = smf_sess_find_by_psi(ho_smf_ue,
+                                    sbi_message.PduSessionCreateData->
+                                        pdu_session_id);
+                            }
+                            if (!sess) {
+                                ogs_error("HO: Session not found [%s:%d]",
+                                    sbi_message.PduSessionCreateData->supi ?
+                                    sbi_message.PduSessionCreateData->supi :
+                                        "NULL",
+                                    sbi_message.PduSessionCreateData->
+                                        pdu_session_id);
+                                smf_sbi_send_pdu_session_create_error(stream,
+                                    OGS_SBI_HTTP_STATUS_NOT_FOUND,
+                                    OGS_SBI_APP_ERRNO_NULL,
+                                    OGS_5GSM_CAUSE_INVALID_MANDATORY_INFORMATION,
+                                    "HO session not found", NULL, NULL);
+                                break;
+                            }
+                            ogs_info("H-SMF HO: found existing session "
+                                    "[%s:%d]",
+                                    sbi_message.PduSessionCreateData->supi,
+                                    sbi_message.PduSessionCreateData->
+                                        pdu_session_id);
+                        } else {
+                            sess = smf_sess_add_by_pdu_session(&sbi_message);
+                            if (!sess) {
+                                ogs_error(
+                                    "smf_sess_add_by_sbi_message() failed");
+                                smf_sbi_send_pdu_session_create_error(stream,
+                                    OGS_SBI_HTTP_STATUS_BAD_REQUEST,
+                                    OGS_SBI_APP_ERRNO_NULL,
+                                    OGS_5GSM_CAUSE_INVALID_MANDATORY_INFORMATION,
+                                    "smf_sess_add_by_sbi_message() failed",
+                                    NULL, NULL);
+                                break;
+                            }
+
+                            smf_metrics_inst_by_slice_add(NULL, NULL,
+                                    SMF_METR_CTR_SM_PDUSESSIONCREATIONREQ, 1);
+                        }
                     END
                     break;
 

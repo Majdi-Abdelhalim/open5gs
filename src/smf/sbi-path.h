@@ -219,6 +219,8 @@ bool smf_sbi_send_sm_context_status_notify(smf_sess_t *sess);
 
 void smf_sbi_send_pdu_session_created_data(
         smf_sess_t *sess, ogs_sbi_stream_t *stream);
+void smf_sbi_send_pdu_session_created_data_ho(
+        smf_sess_t *sess, ogs_sbi_stream_t *stream);
 void smf_sbi_send_pdu_session_create_error(
         ogs_sbi_stream_t *stream,
         int status, ogs_sbi_app_errno_e err, int n1SmCause,

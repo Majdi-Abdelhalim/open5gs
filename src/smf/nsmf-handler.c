@@ -1730,6 +1730,139 @@ bool smf_nsmf_handle_create_data_in_hsmf(
     return true;
 }
 
+bool smf_nsmf_handle_create_data_in_hsmf_ho(
+    smf_sess_t *sess, ogs_sbi_stream_t *stream, ogs_sbi_message_t *recvmsg)
+{
+    bool rc;
+    int rv;
+    smf_ue_t *smf_ue = NULL;
+
+    ogs_sbi_client_t *client = NULL;
+    OpenAPI_uri_scheme_e scheme = OpenAPI_uri_scheme_NULL;
+    char *fqdn = NULL;
+    uint16_t fqdn_port = 0;
+    ogs_sockaddr_t *addr = NULL, *addr6 = NULL;
+
+    OpenAPI_pdu_session_create_data_t *PduSessionCreateData = NULL;
+    OpenAPI_tunnel_info_t *vcnTunnelInfo = NULL;
+
+    ogs_assert(stream);
+    ogs_assert(recvmsg);
+    ogs_assert(sess);
+    smf_ue = smf_ue_find_by_id(sess->smf_ue_id);
+    ogs_assert(smf_ue);
+
+    PduSessionCreateData = recvmsg->PduSessionCreateData;
+    if (!PduSessionCreateData) {
+        ogs_error("[%s:%d] HO: No PduSessionCreateData",
+                smf_ue->supi, sess->psi);
+        smf_sbi_send_pdu_session_create_error(stream,
+                OGS_SBI_HTTP_STATUS_BAD_REQUEST, OGS_SBI_APP_ERRNO_NULL,
+                OGS_5GSM_CAUSE_INVALID_MANDATORY_INFORMATION,
+                "No PduSessionCreateData", smf_ue->supi, NULL);
+        return false;
+    }
+
+    ogs_info("[%s:%d] H-SMF HO: V-SMF insertion, ho_preparation_indication",
+            smf_ue->supi, sess->psi);
+
+    /*
+     * Store V-SMF's callback URI — this activates HOME_ROUTED_ROAMING_IN_HSMF.
+     * For HO, this is critical: it tells the H-SMF that a V-SMF is now present.
+     */
+    if (!PduSessionCreateData->vsmf_pdu_session_uri) {
+        ogs_error("[%s:%d] HO: No vsmfPduSessionUri",
+                smf_ue->supi, sess->psi);
+        smf_sbi_send_pdu_session_create_error(stream,
+                OGS_SBI_HTTP_STATUS_BAD_REQUEST, OGS_SBI_APP_ERRNO_NULL,
+                OGS_5GSM_CAUSE_INVALID_MANDATORY_INFORMATION,
+                "No vsmfPduSessionUri", smf_ue->supi, NULL);
+        return false;
+    }
+
+    rc = ogs_sbi_getaddr_from_uri(&scheme, &fqdn, &fqdn_port, &addr, &addr6,
+            PduSessionCreateData->vsmf_pdu_session_uri);
+    if (rc == false || scheme == OpenAPI_uri_scheme_NULL) {
+        ogs_error("[%s:%d] HO: Invalid vsmfPduSessionUri [%s]",
+                smf_ue->supi, sess->psi,
+                PduSessionCreateData->vsmf_pdu_session_uri);
+        smf_sbi_send_pdu_session_create_error(stream,
+                OGS_SBI_HTTP_STATUS_BAD_REQUEST, OGS_SBI_APP_ERRNO_NULL,
+                OGS_5GSM_CAUSE_SEMANTICALLY_INCORRECT_MESSAGE,
+                "Invalid vsmfPduSessionUri",
+                PduSessionCreateData->vsmf_pdu_session_uri, NULL);
+        return false;
+    }
+
+    if (sess->vsmf_pdu_session_uri)
+        ogs_free(sess->vsmf_pdu_session_uri);
+    sess->vsmf_pdu_session_uri =
+        ogs_strdup(PduSessionCreateData->vsmf_pdu_session_uri);
+    ogs_assert(sess->vsmf_pdu_session_uri);
+
+    client = ogs_sbi_client_find(scheme, fqdn, fqdn_port, addr, addr6);
+    if (!client) {
+        ogs_debug("%s: ogs_sbi_client_add()", OGS_FUNC);
+        client = ogs_sbi_client_add(scheme, fqdn, fqdn_port, addr, addr6);
+        if (!client) {
+            ogs_error("%s: ogs_sbi_client_add() failed", OGS_FUNC);
+            ogs_free(fqdn);
+            ogs_freeaddrinfo(addr);
+            ogs_freeaddrinfo(addr6);
+            return false;
+        }
+    }
+    OGS_SBI_SETUP_CLIENT(&sess->v_smf, client);
+
+    ogs_free(fqdn);
+    ogs_freeaddrinfo(addr);
+    ogs_freeaddrinfo(addr6);
+
+    /* Store V-SMF's VCN tunnel info (V-UPF's N9 endpoint) */
+    vcnTunnelInfo = PduSessionCreateData->vcn_tunnel_info;
+    if (vcnTunnelInfo) {
+        memset(&sess->remote_dl_ip, 0, sizeof(sess->remote_dl_ip));
+        if (vcnTunnelInfo->ipv4_addr) {
+            rv = ogs_ipv4_from_string(
+                    &sess->remote_dl_ip.addr, vcnTunnelInfo->ipv4_addr);
+            if (rv == OGS_OK) {
+                sess->remote_dl_ip.ipv4 = 1;
+                sess->remote_dl_ip.len = OGS_IPV4_LEN;
+            }
+        }
+        if (vcnTunnelInfo->ipv6_addr) {
+            rv = ogs_ipv6addr_from_string(
+                    sess->remote_dl_ip.addr6, vcnTunnelInfo->ipv6_addr);
+            if (rv == OGS_OK) {
+                sess->remote_dl_ip.ipv6 = 1;
+                sess->remote_dl_ip.len = OGS_IPV6_LEN;
+            }
+        }
+        if (sess->remote_dl_ip.ipv4 && sess->remote_dl_ip.ipv6)
+            sess->remote_dl_ip.len = OGS_IPV4V6_LEN;
+
+        if (vcnTunnelInfo->gtp_teid)
+            sess->remote_dl_teid =
+                ogs_uint64_from_string_hexadecimal(vcnTunnelInfo->gtp_teid);
+
+        ogs_info("[%s:%d] H-SMF HO: V-UPF N9 tunnel stored "
+                "(teid=0x%x)", smf_ue->supi, sess->psi, sess->remote_dl_teid);
+    }
+
+    if (PduSessionCreateData->vsmf_id) {
+        ogs_info("[%s:%d] H-SMF HO: V-SMF ID [%s]",
+                smf_ue->supi, sess->psi, PduSessionCreateData->vsmf_id);
+    }
+
+    /*
+     * Send 201 response with existing session context.
+     * No UDM/PCF queries needed — session already exists.
+     */
+    smf_sbi_send_pdu_session_created_data_ho(sess, stream);
+
+    return true;
+}
+
 bool smf_nsmf_handle_created_data_in_vsmf(
     smf_sess_t *sess, ogs_sbi_message_t *recvmsg)
 {
@@ -1783,26 +1916,34 @@ bool smf_nsmf_handle_created_data_in_vsmf(
 
         PduSessionCreatedData = recvmsg->PduSessionCreatedData;
 
-        n1SmInfoToUe = PduSessionCreatedData->n1_sm_info_to_ue;
-        if (!n1SmInfoToUe || !n1SmInfoToUe->content_id) {
-            ogs_error("[%s:%d] No n1SmInfoToUe", smf_ue->supi, sess->psi);
-            return false;
-        }
+        /*
+         * For HO (preparing), H-SMF does not send N1 SM info.
+         * Skip N1 SM parsing for HO case.
+         */
+        if (!sess->ho_state_preparing) {
+            n1SmInfoToUe = PduSessionCreatedData->n1_sm_info_to_ue;
+            if (!n1SmInfoToUe || !n1SmInfoToUe->content_id) {
+                ogs_error("[%s:%d] No n1SmInfoToUe",
+                        smf_ue->supi, sess->psi);
+                return false;
+            }
 
-        n1SmBufToUe = ogs_sbi_find_part_by_content_id(
-                recvmsg, n1SmInfoToUe->content_id);
-        if (!n1SmBufToUe) {
-            ogs_error("[%s:%d] No N1 SM Content [%s]",
-                    smf_ue->supi, sess->psi, n1SmInfoToUe->content_id);
-            return false;
-        }
+            n1SmBufToUe = ogs_sbi_find_part_by_content_id(
+                    recvmsg, n1SmInfoToUe->content_id);
+            if (!n1SmBufToUe) {
+                ogs_error("[%s:%d] No N1 SM Content [%s]",
+                        smf_ue->supi, sess->psi, n1SmInfoToUe->content_id);
+                return false;
+            }
 
-        rv = gsmue_decode_n1_sm_info(&nas_message, n1SmBufToUe);
-        if (rv != OGS_OK) {
-            ogs_error("[%s:%d] cannot decode N1 SM Content [%s]",
-                    smf_ue->supi, sess->psi, n1SmInfoToUe->content_id);
-            ogs_log_hexdump(OGS_LOG_ERROR, n1SmBufToUe->data, n1SmBufToUe->len);
-            return false;
+            rv = gsmue_decode_n1_sm_info(&nas_message, n1SmBufToUe);
+            if (rv != OGS_OK) {
+                ogs_error("[%s:%d] cannot decode N1 SM Content [%s]",
+                        smf_ue->supi, sess->psi, n1SmInfoToUe->content_id);
+                ogs_log_hexdump(OGS_LOG_ERROR,
+                        n1SmBufToUe->data, n1SmBufToUe->len);
+                return false;
+            }
         }
 
         if (!PduSessionCreatedData->pdu_session_type) {
@@ -2093,32 +2234,34 @@ bool smf_nsmf_handle_created_data_in_vsmf(
 
         ogs_sbi_header_free(&header);
 
-        /* Handle GSM Message from n1SmInfoToUe */
-        pdu_session_establishment_accept =
-            &nas_message.gsm.pdu_session_establishment_accept;
+        if (!sess->ho_state_preparing) {
+            /* Handle GSM Message from n1SmInfoToUe */
+            pdu_session_establishment_accept =
+                &nas_message.gsm.pdu_session_establishment_accept;
 
-        if (pdu_session_establishment_accept->presencemask &
-            OGS_NAS_5GS_PDU_SESSION_ESTABLISHMENT_ACCEPT_5GSM_CAUSE_PRESENT) {
-            ogs_nas_5gsm_cause_t *gsm_cause =
-                &pdu_session_establishment_accept->gsm_cause;
-            sess->h_smf_gsm_cause = *gsm_cause;
+            if (pdu_session_establishment_accept->presencemask &
+                OGS_NAS_5GS_PDU_SESSION_ESTABLISHMENT_ACCEPT_5GSM_CAUSE_PRESENT) {
+                ogs_nas_5gsm_cause_t *gsm_cause =
+                    &pdu_session_establishment_accept->gsm_cause;
+                sess->h_smf_gsm_cause = *gsm_cause;
+            }
+
+            if (pdu_session_establishment_accept->presencemask &
+                OGS_NAS_5GS_PDU_SESSION_ESTABLISHMENT_ACCEPT_EXTENDED_PROTOCOL_CONFIGURATION_OPTIONS_PRESENT) {
+                OGS_NAS_STORE_DATA(
+                    &sess->h_smf_extended_protocol_configuration_options,
+                    &pdu_session_establishment_accept->
+                        extended_protocol_configuration_options);
+            }
+
+            ogs_assert(OGS_OK ==
+                    smf_5gc_pfcp_send_one_qos_flow_modification_request(
+                        qos_flow, NULL,
+                        OGS_PFCP_MODIFY_HOME_ROUTED_ROAMING|
+                        OGS_PFCP_MODIFY_UL_ONLY|
+                        OGS_PFCP_MODIFY_OUTER_HEADER_REMOVAL|
+                        OGS_PFCP_MODIFY_ACTIVATE, 0));
         }
-
-        if (pdu_session_establishment_accept->presencemask &
-            OGS_NAS_5GS_PDU_SESSION_ESTABLISHMENT_ACCEPT_EXTENDED_PROTOCOL_CONFIGURATION_OPTIONS_PRESENT) {
-            OGS_NAS_STORE_DATA(
-                &sess->h_smf_extended_protocol_configuration_options,
-                &pdu_session_establishment_accept->
-                    extended_protocol_configuration_options);
-        }
-
-        ogs_assert(OGS_OK ==
-                smf_5gc_pfcp_send_one_qos_flow_modification_request(
-                    qos_flow, NULL,
-                    OGS_PFCP_MODIFY_HOME_ROUTED_ROAMING|
-                    OGS_PFCP_MODIFY_UL_ONLY|
-                    OGS_PFCP_MODIFY_OUTER_HEADER_REMOVAL|
-                    OGS_PFCP_MODIFY_ACTIVATE, 0));
 
         ogs_info("UE SUPI[%s] DNN[%s] S_NSSAI[SST:%d SD:0x%x] "
                 "pduSessionRef[%s] pduSessionResourceURI[%s]",

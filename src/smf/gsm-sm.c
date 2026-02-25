@@ -813,16 +813,21 @@ void smf_gsm_state_wait_pfcp_establishment(ogs_fsm_t *s, smf_event_t *e)
                     if (sess->ho_state_preparing) {
                         /*
                          * V-SMF insertion HO (TS 23.502 §4.23.7):
-                         * V-UPF N4 session established. Build N2 SM
-                         * (HandoverRequestTransfer with V-UPF N3 F-TEID)
-                         * and send deferred 201 response to AMF.
-                         * H-SMF contact is deferred to post-HO phase.
+                         * V-UPF N4 session established. Now contact H-SMF
+                         * with ho_preparation_indication=true to register
+                         * V-SMF and get session context (QoS, PSA UPF tunnel).
+                         * The deferred 201 to T-AMF will be sent after
+                         * H-SMF responds.
                          */
                         ogs_info("[%d] V-SMF HO: N4 established, "
-                                "sending deferred 201 with N2 SM",
+                                "contacting H-SMF",
                                 sess->psi);
-                        smf_sbi_send_sm_context_created_data_ho_preparing(
-                                sess);
+                        r = smf_sbi_discover_and_send(
+                                OGS_SBI_SERVICE_TYPE_NSMF_PDUSESSION, NULL,
+                                smf_nsmf_pdusession_build_create_data,
+                                sess, NULL, 0, NULL);
+                        ogs_expect(r == OGS_OK);
+                        ogs_assert(r != OGS_ERROR);
                     } else {
                         r = smf_sbi_discover_and_send(
                                 OGS_SBI_SERVICE_TYPE_NSMF_PDUSESSION, NULL,
@@ -1400,13 +1405,32 @@ void smf_gsm_state_operational(ogs_fsm_t *s, smf_event_t *e)
                     OGS_FSM_TRAN(s, smf_gsm_state_wait_pfcp_deletion);
                     break;
                 DEFAULT
-                    ogs_error("Invalid resource name [%s]",
-                                sbi_message->h.resource.component[2]);
-                    ogs_assert(true ==
-                        ogs_sbi_server_send_error(stream,
-                            OGS_SBI_HTTP_STATUS_BAD_REQUEST, sbi_message,
-                            "Invalid resource name [%s]",
-                            sbi_message->h.resource.component[2], NULL));
+                    /*
+                     * H-SMF: POST /pdu-sessions with ho_preparation_indication
+                     * from V-SMF during handover. Session already exists.
+                     * Store V-SMF info and return session context.
+                     */
+                    if (sbi_message->PduSessionCreateData &&
+                        sbi_message->PduSessionCreateData->
+                            is_ho_preparation_indication &&
+                        sbi_message->PduSessionCreateData->
+                            ho_preparation_indication) {
+                        if (smf_nsmf_handle_create_data_in_hsmf_ho(
+                                sess, stream, sbi_message) == false) {
+                            ogs_error(
+                                "smf_nsmf_handle_create_data_in_hsmf_ho() "
+                                "failed");
+                        }
+                    } else {
+                        ogs_error("Invalid resource name [%s]",
+                                    sbi_message->h.resource.component[2]);
+                        ogs_assert(true ==
+                            ogs_sbi_server_send_error(stream,
+                                OGS_SBI_HTTP_STATUS_BAD_REQUEST, sbi_message,
+                                "Invalid resource name [%s]",
+                                sbi_message->h.resource.component[2], NULL));
+                        OGS_FSM_TRAN(s, smf_gsm_state_exception);
+                    }
                     OGS_FSM_TRAN(s, smf_gsm_state_exception);
                 END
                 break;
@@ -1737,6 +1761,17 @@ void smf_gsm_state_operational(ogs_fsm_t *s, smf_event_t *e)
                                     smf_ue->supi, sess->psi,
                                     sbi_message->res_status);
                             OGS_FSM_TRAN(s, smf_gsm_state_exception);
+                        } else if (sess->ho_state_preparing) {
+                            /*
+                             * HO: H-SMF replied 201 without N1 SM.
+                             * No PFCP modification sent — send deferred 201
+                             * to T-AMF now (HandoverRequiredAcknowledge path).
+                             */
+                            ogs_info("[%s:%d] V-SMF HO: H-SMF 201 received, "
+                                    "sending deferred 201 to T-AMF",
+                                    smf_ue->supi, sess->psi);
+                            smf_sbi_send_sm_context_created_data_ho_preparing(
+                                    sess);
                         }
                     END
                     break;

@@ -208,75 +208,91 @@ ogs_sbi_request_t *smf_nsmf_pdusession_build_create_data(
         goto end;
     }
 
-    ogs_assert(sess->n1SmBufFromUe);
-    rv = ogs_nas_5gsm_decode(&nas_message, sess->n1SmBufFromUe);
+    if (sess->ho_state_preparing) {
+        /*
+         * V-SMF insertion HO (TS 23.502 §4.23.7):
+         * No N1 SM from UE — set ho_preparation_indication instead.
+         * Use default integrity protection rates.
+         */
+        PduSessionCreateData.is_ho_preparation_indication = true;
+        PduSessionCreateData.ho_preparation_indication = true;
+        PduSessionCreateData.max_integrity_protected_data_rate_ul =
+            OpenAPI_max_integrity_protected_data_rate_MAX_UE_RATE;
+        PduSessionCreateData.max_integrity_protected_data_rate_dl =
+            OpenAPI_max_integrity_protected_data_rate_MAX_UE_RATE;
+    } else {
+        ogs_assert(sess->n1SmBufFromUe);
+        rv = ogs_nas_5gsm_decode(&nas_message, sess->n1SmBufFromUe);
 
-    if (rv == OGS_OK) {
-        n1SmBufFromUe = gsmue_encode_n1_sm_info(&nas_message);
-        message.part[message.num_of_part].pkbuf = n1SmBufFromUe;
-        if (message.part[message.num_of_part].pkbuf) {
-            message.part[message.num_of_part].content_id =
-                (char *)OGS_SBI_CONTENT_5GNAS_SM_ID;
-            message.part[message.num_of_part].content_type =
-                (char *)OGS_SBI_CONTENT_5GNAS_TYPE;
-            message.num_of_part++;
+        if (rv == OGS_OK) {
+            n1SmBufFromUe = gsmue_encode_n1_sm_info(&nas_message);
+            message.part[message.num_of_part].pkbuf = n1SmBufFromUe;
+            if (message.part[message.num_of_part].pkbuf) {
+                message.part[message.num_of_part].content_id =
+                    (char *)OGS_SBI_CONTENT_5GNAS_SM_ID;
+                message.part[message.num_of_part].content_type =
+                    (char *)OGS_SBI_CONTENT_5GNAS_TYPE;
+                message.num_of_part++;
 
-            n1SmInfoFromUe.content_id = (char *)OGS_SBI_CONTENT_5GNAS_SM_ID;
-            PduSessionCreateData.n1_sm_info_from_ue = &n1SmInfoFromUe;
+                n1SmInfoFromUe.content_id =
+                    (char *)OGS_SBI_CONTENT_5GNAS_SM_ID;
+                PduSessionCreateData.n1_sm_info_from_ue = &n1SmInfoFromUe;
 
-            pdu_session_establishment_request =
-                &nas_message.gsm.pdu_session_establishment_request;
-            integrity_protection_maximum_data_rate =
-                &pdu_session_establishment_request->
-                integrity_protection_maximum_data_rate;
+                pdu_session_establishment_request =
+                    &nas_message.gsm.pdu_session_establishment_request;
+                integrity_protection_maximum_data_rate =
+                    &pdu_session_establishment_request->
+                    integrity_protection_maximum_data_rate;
 
-            switch (integrity_protection_maximum_data_rate->ul) {
-            case OGS_NAS_INTEGRITY_PROTECTION_MAXIMUM_DATA_RATE_64KBPS:
-                PduSessionCreateData.max_integrity_protected_data_rate_ul =
-                    OpenAPI_max_integrity_protected_data_rate__64_KBPS;
-                break;
-            case OGS_NAS_INTEGRITY_PROTECTION_MAXIMUM_DATA_RATE_NULL:
-                PduSessionCreateData.max_integrity_protected_data_rate_ul =
-                    OpenAPI_max_integrity_protected_data_rate_NULL;
-                break;
-            case OGS_NAS_INTEGRITY_PROTECTION_MAXIMUM_DATA_RATE_FULL:
-                PduSessionCreateData.max_integrity_protected_data_rate_ul =
-                    OpenAPI_max_integrity_protected_data_rate_MAX_UE_RATE;
-                break;
-            default:
-                ogs_error("Unknown Integrity Protection "
-                        "Maximum Data Rate [UL:%d]",
-                        integrity_protection_maximum_data_rate->ul);
-                break;
-            }
+                switch (integrity_protection_maximum_data_rate->ul) {
+                case OGS_NAS_INTEGRITY_PROTECTION_MAXIMUM_DATA_RATE_64KBPS:
+                    PduSessionCreateData.max_integrity_protected_data_rate_ul =
+                        OpenAPI_max_integrity_protected_data_rate__64_KBPS;
+                    break;
+                case OGS_NAS_INTEGRITY_PROTECTION_MAXIMUM_DATA_RATE_NULL:
+                    PduSessionCreateData.max_integrity_protected_data_rate_ul =
+                        OpenAPI_max_integrity_protected_data_rate_NULL;
+                    break;
+                case OGS_NAS_INTEGRITY_PROTECTION_MAXIMUM_DATA_RATE_FULL:
+                    PduSessionCreateData.max_integrity_protected_data_rate_ul =
+                        OpenAPI_max_integrity_protected_data_rate_MAX_UE_RATE;
+                    break;
+                default:
+                    ogs_error("Unknown Integrity Protection "
+                            "Maximum Data Rate [UL:%d]",
+                            integrity_protection_maximum_data_rate->ul);
+                    break;
+                }
 
-            switch (integrity_protection_maximum_data_rate->dl) {
-            case OGS_NAS_INTEGRITY_PROTECTION_MAXIMUM_DATA_RATE_64KBPS:
-                PduSessionCreateData.max_integrity_protected_data_rate_dl =
-                    OpenAPI_max_integrity_protected_data_rate__64_KBPS;
-                break;
-            case OGS_NAS_INTEGRITY_PROTECTION_MAXIMUM_DATA_RATE_NULL:
-                PduSessionCreateData.max_integrity_protected_data_rate_dl =
-                    OpenAPI_max_integrity_protected_data_rate_NULL;
-                break;
-            case OGS_NAS_INTEGRITY_PROTECTION_MAXIMUM_DATA_RATE_FULL:
-                PduSessionCreateData.max_integrity_protected_data_rate_dl =
-                    OpenAPI_max_integrity_protected_data_rate_MAX_UE_RATE;
-                break;
-            defadlt:
-                ogs_error("Unknown Integrity Protection "
-                        "Maximum Data Rate [DL:%d]",
-                        integrity_protection_maximum_data_rate->dl);
-                break;
+                switch (integrity_protection_maximum_data_rate->dl) {
+                case OGS_NAS_INTEGRITY_PROTECTION_MAXIMUM_DATA_RATE_64KBPS:
+                    PduSessionCreateData.max_integrity_protected_data_rate_dl =
+                        OpenAPI_max_integrity_protected_data_rate__64_KBPS;
+                    break;
+                case OGS_NAS_INTEGRITY_PROTECTION_MAXIMUM_DATA_RATE_NULL:
+                    PduSessionCreateData.max_integrity_protected_data_rate_dl =
+                        OpenAPI_max_integrity_protected_data_rate_NULL;
+                    break;
+                case OGS_NAS_INTEGRITY_PROTECTION_MAXIMUM_DATA_RATE_FULL:
+                    PduSessionCreateData.max_integrity_protected_data_rate_dl =
+                        OpenAPI_max_integrity_protected_data_rate_MAX_UE_RATE;
+                    break;
+                default:
+                    ogs_error("Unknown Integrity Protection "
+                            "Maximum Data Rate [DL:%d]",
+                            integrity_protection_maximum_data_rate->dl);
+                    break;
+                }
+            } else {
+                ogs_error("gsm_encode_n1_sm_info() failed [%d]", rv);
+                ogs_log_hexdump(OGS_LOG_ERROR,
+                        sess->n1SmBufFromUe->data, sess->n1SmBufFromUe->len);
             }
         } else {
-            ogs_error("gsm_encode_n1_sm_info() failed [%d]", rv);
+            ogs_error("ogs_nas_5gsm_decode() failed [%d]", rv);
             ogs_log_hexdump(OGS_LOG_ERROR,
                     sess->n1SmBufFromUe->data, sess->n1SmBufFromUe->len);
         }
-    } else {
-        ogs_error("ogs_nas_5gsm_decode() failed [%d]", rv);
-        ogs_log_hexdump(OGS_LOG_ERROR, sess->n1SmBufFromUe->data, sess->n1SmBufFromUe->len);
     }
 
     message.PduSessionCreateData = &PduSessionCreateData;

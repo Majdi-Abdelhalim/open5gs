@@ -745,6 +745,240 @@ end:
         ogs_free(PduSessionCreatedData.ue_ipv6_prefix);
 }
 
+void smf_sbi_send_pdu_session_created_data_ho(
+        smf_sess_t *sess, ogs_sbi_stream_t *stream)
+{
+    int rv;
+    OpenAPI_pdu_session_created_data_t PduSessionCreatedData;
+
+    OpenAPI_tunnel_info_t hcnTunnelInfo;
+    char ssc_mode[2];
+    OpenAPI_ambr_t sessionAmbr;
+    OpenAPI_list_t *qosFlowsSetupList = NULL;
+    OpenAPI_qos_flow_setup_item_t *qosFlowSetupItem = NULL;
+    OpenAPI_qos_flow_profile_t *qosFlowProfile = NULL;
+    OpenAPI_arp_t *Arp = NULL;
+
+    ogs_nas_qos_rule_t qos_rule[OGS_NAS_MAX_NUM_OF_QOS_RULE];
+    ogs_nas_qos_rules_t authorized_qos_rules;
+
+    ogs_nas_qos_flow_description_t
+        qos_flow_description[OGS_NAS_MAX_NUM_OF_QOS_FLOW_DESCRIPTION];
+    ogs_nas_qos_flow_descriptions_t authorized_qos_flow_descriptions;
+
+    char ue_ipv6_interface_id[16+1];
+    int enc_len = 0;
+
+    ogs_sbi_server_t *server = NULL;
+    ogs_sbi_header_t header;
+    ogs_sbi_message_t sendmsg;
+    ogs_sbi_response_t *response = NULL;
+
+    smf_bearer_t *qos_flow = NULL;
+
+    memset(&PduSessionCreatedData, 0, sizeof(PduSessionCreatedData));
+    memset(ssc_mode, 0, sizeof(ssc_mode));
+    memset(&hcnTunnelInfo, 0, sizeof(hcnTunnelInfo));
+    memset(&sessionAmbr, 0, sizeof(sessionAmbr));
+
+    ogs_assert(sess->session.session_type);
+    PduSessionCreatedData.pdu_session_type = sess->session.session_type;
+
+    ogs_assert(sess->session.ssc_mode);
+    ssc_mode[0] = ogs_to_hex(sess->session.ssc_mode);
+    PduSessionCreatedData.ssc_mode = ssc_mode;
+
+    /* PSA UPF's tunnel info for V-UPF to forward upstream (N9) */
+    if (sess->local_ul_addr)
+        hcnTunnelInfo.ipv4_addr = ogs_ipstrdup(sess->local_ul_addr);
+    if (sess->local_ul_addr6)
+        hcnTunnelInfo.ipv6_addr = ogs_ipstrdup(sess->local_ul_addr6);
+    hcnTunnelInfo.gtp_teid = ogs_uint32_to_0string(sess->local_ul_teid);
+    PduSessionCreatedData.hcn_tunnel_info = &hcnTunnelInfo;
+
+    if (sess->session.ambr.uplink)
+        sessionAmbr.uplink = ogs_sbi_bitrate_to_string(
+            sess->session.ambr.uplink, OGS_SBI_BITRATE_KBPS);
+    if (sess->session.ambr.downlink)
+        sessionAmbr.downlink = ogs_sbi_bitrate_to_string(
+            sess->session.ambr.downlink, OGS_SBI_BITRATE_KBPS);
+
+    if (sessionAmbr.uplink || sessionAmbr.downlink)
+        PduSessionCreatedData.session_ambr = &sessionAmbr;
+
+    qos_flow = smf_default_bearer_in_sess(sess);
+    ogs_assert(qos_flow);
+    ogs_assert(ogs_list_next(qos_flow) == NULL);
+
+    memset(qos_rule, 0, sizeof(qos_rule));
+    gsm_encode_default_qos_rule(&qos_rule[0], qos_flow);
+
+    memset(&authorized_qos_rules, 0, sizeof(authorized_qos_rules));
+    rv = ogs_nas_build_qos_rules(&authorized_qos_rules, qos_rule, 1);
+    ogs_assert(rv == OGS_OK);
+    ogs_assert(authorized_qos_rules.length);
+
+    memset(&qos_flow_description, 0, sizeof(qos_flow_description));
+    gsm_encode_default_qos_flow_description(&qos_flow_description[0],
+            qos_flow);
+
+    memset(&authorized_qos_flow_descriptions, 0,
+            sizeof(authorized_qos_flow_descriptions));
+    rv = ogs_nas_build_qos_flow_descriptions(
+            &authorized_qos_flow_descriptions, qos_flow_description, 1);
+    ogs_assert(rv == OGS_OK);
+    ogs_assert(authorized_qos_flow_descriptions.length);
+
+    qosFlowsSetupList = OpenAPI_list_create();
+    ogs_assert(qosFlowsSetupList);
+
+    qosFlowSetupItem = ogs_calloc(1, sizeof(*qosFlowSetupItem));
+    ogs_assert(qosFlowSetupItem);
+
+    qosFlowSetupItem->qfi = qos_flow->qfi;
+    if (qos_rule[0].DQR_bit) {
+        qosFlowSetupItem->is_default_qos_rule_ind = true;
+        qosFlowSetupItem->default_qos_rule_ind = true;
+    }
+
+    enc_len = ogs_base64_encode_len(authorized_qos_rules.length);
+    qosFlowSetupItem->qos_rules = ogs_calloc(1, enc_len);
+    ogs_assert(qosFlowSetupItem->qos_rules);
+    ogs_base64_encode(qosFlowSetupItem->qos_rules,
+            authorized_qos_rules.buffer, authorized_qos_rules.length);
+    ogs_free(authorized_qos_rules.buffer);
+
+    enc_len = ogs_base64_encode_len(authorized_qos_flow_descriptions.length);
+    qosFlowSetupItem->qos_flow_description = ogs_calloc(1, enc_len);
+    ogs_assert(qosFlowSetupItem->qos_flow_description);
+    ogs_base64_encode(qosFlowSetupItem->qos_flow_description,
+            authorized_qos_flow_descriptions.buffer,
+            authorized_qos_flow_descriptions.length);
+    ogs_free(authorized_qos_flow_descriptions.buffer);
+
+    Arp = ogs_calloc(1, sizeof(*Arp));
+    ogs_assert(Arp);
+    if (qos_flow->qos.arp.pre_emption_capability ==
+            OGS_5GC_PRE_EMPTION_ENABLED)
+        Arp->preempt_cap = OpenAPI_preemption_capability_MAY_PREEMPT;
+    else if (qos_flow->qos.arp.pre_emption_capability ==
+            OGS_5GC_PRE_EMPTION_DISABLED)
+        Arp->preempt_cap = OpenAPI_preemption_capability_NOT_PREEMPT;
+    else {
+        ogs_error("No Arp->preempt_cap");
+        goto end;
+    }
+    if (qos_flow->qos.arp.pre_emption_vulnerability ==
+            OGS_5GC_PRE_EMPTION_ENABLED)
+        Arp->preempt_vuln = OpenAPI_preemption_vulnerability_PREEMPTABLE;
+    else if (qos_flow->qos.arp.pre_emption_vulnerability ==
+            OGS_5GC_PRE_EMPTION_DISABLED)
+        Arp->preempt_vuln = OpenAPI_preemption_vulnerability_NOT_PREEMPTABLE;
+    else {
+        ogs_error("No Arp->preempt_vuln");
+        goto end;
+    }
+    Arp->priority_level = qos_flow->qos.arp.priority_level;
+
+    qosFlowProfile = ogs_calloc(1, sizeof(*qosFlowProfile));
+    ogs_assert(qosFlowProfile);
+    qosFlowProfile->arp = Arp;
+    qosFlowProfile->_5qi = qos_flow->qos.index;
+
+    qosFlowSetupItem->qos_flow_profile = qosFlowProfile;
+    OpenAPI_list_add(qosFlowsSetupList, qosFlowSetupItem);
+
+    if (qosFlowsSetupList->count)
+        PduSessionCreatedData.qos_flows_setup_list = qosFlowsSetupList;
+    else
+        OpenAPI_list_free(qosFlowsSetupList);
+
+    PduSessionCreatedData.h_smf_instance_id =
+        NF_INSTANCE_ID(ogs_sbi_self()->nf_instance);
+    ogs_assert(PduSessionCreatedData.h_smf_instance_id);
+
+    /* UE IP address */
+    memset(ue_ipv6_interface_id, 0, sizeof(ue_ipv6_interface_id));
+    if (sess->paa.session_type == OGS_PDU_SESSION_TYPE_IPV4) {
+        PduSessionCreatedData.ue_ipv4_address =
+            ogs_ipv4_to_string(sess->paa.addr);
+    } else if (sess->paa.session_type == OGS_PDU_SESSION_TYPE_IPV6) {
+        PduSessionCreatedData.ue_ipv6_prefix =
+            ogs_ipv6prefix_to_string(
+                    sess->paa.addr6, OGS_IPV6_DEFAULT_PREFIX_LEN);
+        ogs_hex_to_ascii(
+                sess->paa.addr6+(OGS_IPV6_LEN>>1), OGS_IPV6_LEN>>1,
+                ue_ipv6_interface_id, sizeof(ue_ipv6_interface_id));
+        PduSessionCreatedData.ue_ipv6_interface_id = ue_ipv6_interface_id;
+    } else if (sess->paa.session_type == OGS_PDU_SESSION_TYPE_IPV4V6) {
+        PduSessionCreatedData.ue_ipv4_address =
+            ogs_ipv4_to_string(sess->paa.both.addr);
+        PduSessionCreatedData.ue_ipv6_prefix =
+            ogs_ipv6prefix_to_string(
+                    sess->paa.both.addr6, OGS_IPV6_DEFAULT_PREFIX_LEN);
+        ogs_hex_to_ascii(
+                sess->paa.addr6+(OGS_IPV6_LEN>>1), OGS_IPV6_LEN>>1,
+                ue_ipv6_interface_id, sizeof(ue_ipv6_interface_id));
+        PduSessionCreatedData.ue_ipv6_interface_id = ue_ipv6_interface_id;
+    } else {
+        ogs_error("Invalid sess->session.session_type[%d]",
+                sess->paa.session_type);
+        goto end;
+    }
+
+    /*
+     * No N1 SM info for HO — the UE doesn't receive NAS during preparation.
+     * PduSessionCreatedData.n1_sm_info_to_ue is left NULL.
+     */
+
+    memset(&sendmsg, 0, sizeof(sendmsg));
+
+    memset(&header, 0, sizeof(header));
+    header.service.name = (char *)OGS_SBI_SERVICE_NAME_NSMF_PDUSESSION;
+    header.api.version = (char *)OGS_SBI_API_V1;
+    header.resource.component[0] =
+        (char *)OGS_SBI_RESOURCE_NAME_PDU_SESSIONS;
+    ogs_assert(sess->pdu_session_ref);
+    header.resource.component[1] = sess->pdu_session_ref;
+
+    server = ogs_sbi_server_from_stream(stream);
+    ogs_assert(server);
+    sendmsg.http.location = ogs_sbi_server_uri(server, &header);
+    ogs_assert(sendmsg.http.location);
+
+    sendmsg.PduSessionCreatedData = &PduSessionCreatedData;
+
+    response = ogs_sbi_build_response(&sendmsg,
+            OGS_SBI_HTTP_STATUS_CREATED);
+    ogs_assert(response);
+    ogs_assert(true == ogs_sbi_server_send_response(stream, response));
+
+    ogs_info("[%d] H-SMF HO: sent 201 PduSessionCreatedData "
+            "(no N1 SM, with hcnTunnelInfo)", sess->psi);
+
+    ogs_free(sendmsg.http.location);
+
+end:
+    if (hcnTunnelInfo.ipv4_addr)
+        ogs_free(hcnTunnelInfo.ipv4_addr);
+    if (hcnTunnelInfo.ipv6_addr)
+        ogs_free(hcnTunnelInfo.ipv6_addr);
+    if (hcnTunnelInfo.gtp_teid)
+        ogs_free(hcnTunnelInfo.gtp_teid);
+
+    if (sessionAmbr.uplink)
+        ogs_free(sessionAmbr.uplink);
+    if (sessionAmbr.downlink)
+        ogs_free(sessionAmbr.downlink);
+
+    CLEAR_QOS_FLOWS_SETUP_LIST(PduSessionCreatedData.qos_flows_setup_list);
+
+    if (PduSessionCreatedData.ue_ipv4_address)
+        ogs_free(PduSessionCreatedData.ue_ipv4_address);
+    if (PduSessionCreatedData.ue_ipv6_prefix)
+        ogs_free(PduSessionCreatedData.ue_ipv6_prefix);
+}
+
 void smf_sbi_send_sm_context_updated_data(
         smf_sess_t *sess, ogs_sbi_stream_t *stream,
         OpenAPI_up_cnx_state_e up_cnx_state,

@@ -270,6 +270,9 @@ The H-SMF (regular SMF at 999-70) must handle `Nsmf_PDUSession_Create` from the 
    - Session QoS parameters (QFI list, QoS characteristics)
    - PSA UPF's current GTP-U tunnel endpoint info
    - 201 status with `PduSessionCreatedData`
+5. Build & Test (Remember to verify test cases pass and pcap files show correct messages)
+6. Record deviation from the plan to end of plan file
+7. Git commit
 
 **Build & Test:**
 ```bash
@@ -320,6 +323,9 @@ After the target gNB responds with HandoverRequestAck, the target AMF must: send
 4. **Source AMF: Handle CreateUEContext 201** — [src/amf/namf-handler.c](src/amf/namf-handler.c#L2333) `amf_namf_comm_handle_create_ue_context_response()`:
    - For V-SMF insertion case (UE was at HPLMN): no UpdateSMContext to any SMF needed
    - Directly send HandoverCommand to source gNB with the N2 SM from the 201 response
+5. Build & Test (Remember to verify test cases pass and pcap files show correct messages)
+6. Record deviation from the plan to end of plan file
+7. Git commit
 
 **Build & Test:**
 ```bash
@@ -369,6 +375,9 @@ After HandoverNotify, the target AMF sends UpdateSMContext(COMPLETED) to V-SMF, 
    - Clean up source UE context
    - The old N3 tunnel (source gNB → PSA UPF) is no longer used
    - PSA UPF forwarding rules are updated by H-SMF to use N9
+5. Build & Test (Remember to verify test cases pass and pcap files show correct messages)
+6. Record deviation from the plan to end of plan file
+7. Git commit
 
 **Build & Test:**
 ```bash
@@ -411,6 +420,9 @@ Enable RANStatusTransfer forwarding for inter-AMF HR handover to preserve PDCP s
    - Call `ngap_send_downlink_ran_status_transfer()` to target gNB
 
 4. **Test update** — Already handled in Phase 1 (test sends UplinkRANStatusTransfer, expects DownlinkRANStatusTransfer)
+5. Build & Test (Remember to verify test cases pass and pcap files show correct messages)
+6. Record deviation from the plan to end of plan file
+7. Git commit
 
 **Build & Test:**
 ```bash
@@ -471,6 +483,9 @@ Implement cancel and failure handling for the V-SMF insertion case.
    - Send Nsmf_PDUSession_Release to H-SMF to unregister V-SMF
 
 4. Update test4 and test5 in [n2-handover-hr-test.c](tests/roaming/n2-handover-hr-test.c) for the V-SMF insertion flow
+5. Build & Test (Remember to verify test cases pass and pcap files show correct messages)
+6. Record deviation from the plan to end of plan file
+7. Git commit
 
 **Build & Test:**
 ```bash
@@ -533,6 +548,9 @@ sleep 3
    - RANStatusTransfer: source gNB → S-AMF → SEPP → T-AMF → target gNB
    - N2InfoNotify: T-AMF → SEPP → S-AMF
    - V-UPF N4 sessions on 127.0.2.7
+5. Build & Test (Remember to verify test cases pass and pcap files show correct messages)
+6. Record deviation from the plan to end of plan file
+7. Git commit
 
 **Deviation recording:** Append any deviations to this plan file.
 
@@ -590,4 +608,13 @@ sleep 3
 
 ## Implementation Deviations
 
-*(To be filled during implementation)*
+### Phase 5 Deviations
+
+1. **BugFix in `src/amf/namf-build.c` — PduSessionContext `smf_service_instance_id`**:
+   The plan did not account for the S-AMF's CreateUEContext builder passing the wrong URL as `smf_service_instance_id` in PduSessionContext. It was set to `sess->sm_context_resource_uri` (which resolves to `<apiroot>/nsmf-pdusession/v1/sm-contexts/<ref>`). The T-AMF stored this as the H-SMF URI and passed it to the V-SMF, which then POSTed `PduSessionCreateData` to the sm-contexts endpoint instead of the pdu-sessions endpoint. This caused the H-SMF to try parsing it as `SmContextCreateData`, failing with `serving_nf_id` parse error, and the V-SMF to crash when the response came back with resource name `sm-contexts`. **Fix**: Extract the apiroot from `sm_context_resource_uri` using `ogs_sbi_getaddr_from_uri()` + `ogs_sbi_client_apiroot()` and construct the proper `<apiroot>/nsmf-pdusession/v1/pdu-sessions` URL.
+
+2. **`smf_sbi_send_pdu_session_created_data_ho()` is a full clone (~250 lines) of `smf_sbi_send_pdu_session_created_data()` minus N1 SM**: Rather than adding conditional logic to the existing function, a separate function was created to avoid complexity in the already-large response builder. The HO version omits `n1SmInfoToUe`/`n1SmBufToUe` since there is no NAS SM message during handover preparation.
+
+3. **`smf_nsmf_handle_created_data_in_vsmf()` modifications**: Two sections wrapped in `if (!sess->ho_state_preparing)` — (a) N1 SM check/decode around lines 1920-1940, and (b) NAS message handling + PFCP modification around lines 2230-2258. During HO, the V-SMF skips N1 SM parsing and does not send PFCP modification request (no QoS flow modification needed during preparation).
+
+4. **Deferred 201 to T-AMF**: In `gsm-sm.c` operational state `OGS_FSM_ENTRY_SIG`/`SBI_CLIENT DEFAULT`, after `smf_nsmf_handle_created_data_in_vsmf()` succeeds for HO, the V-SMF calls `smf_sbi_send_sm_context_created_data_ho_preparing()` to send the deferred 201 response to the T-AMF. This was implied but not explicitly detailed in the plan.
