@@ -642,12 +642,186 @@ int amf_nsmf_pdusession_handle_update_sm_context(
                 AMF_SESS_STORE_N2_TRANSFER(
                         sess, handover_command, ogs_pkbuf_copy(n2smbuf));
 
-                if (AMF_SESSION_SYNC_DONE(amf_ue, state)) {
-                    r = ngap_send_handover_command(amf_ue);
-                    ogs_expect(r == OGS_OK);
-                    ogs_assert(r != OGS_ERROR);
+                if (state ==
+                    AMF_UPDATE_SM_CONTEXT_INTER_PLMN_HANDOVER_PREPARED) {
+                    /*
+                     * Phase 6: T-AMF received HandoverCommandTransfer
+                     * from V-SMF. Once all sessions respond, build and
+                     * send CreateUEContext 201 to S-AMF.
+                     */
+                    if (AMF_SESSION_SYNC_DONE(amf_ue, state)) {
+                        ogs_sbi_stream_t *stream201 = NULL;
+                        ogs_sbi_message_t sendmsg;
+                        ogs_sbi_response_t *response = NULL;
+                        OpenAPI_ue_context_created_data_t UeContextCreatedData;
+                        OpenAPI_ue_context_t UeContext;
+                        OpenAPI_n2_info_content_t targetToSourceData;
+                        OpenAPI_ref_to_binary_data_t ngapData;
+                        ogs_pkbuf_t *container_pkbuf = NULL;
 
-                    AMF_UE_CLEAR_N2_TRANSFER(amf_ue, handover_command);
+                        ogs_info("[%s] Inter-PLMN PREPARED: all sessions "
+                                "ready, sending CreateUEContext 201",
+                                amf_ue->supi);
+
+                        stream201 = ogs_sbi_stream_find_by_id(
+                                amf_ue->create_ue_context_stream_id);
+                        if (!stream201) {
+                            ogs_error("Cannot find deferred "
+                                    "CreateUEContext stream");
+                            AMF_UE_CLEAR_N2_TRANSFER(
+                                    amf_ue, handover_command);
+                            return OGS_ERROR;
+                        }
+                        amf_ue->create_ue_context_stream_id =
+                                OGS_INVALID_POOL_ID;
+
+                        memset(&UeContext, 0, sizeof(UeContext));
+                        UeContext.supi = amf_ue->supi;
+
+                        memset(&ngapData, 0, sizeof(ngapData));
+                        ngapData.content_id = (char *)"ngap-tar-to-src";
+
+                        memset(&targetToSourceData, 0,
+                                sizeof(targetToSourceData));
+                        targetToSourceData.ngap_ie_type =
+                            OpenAPI_ngap_ie_type_TAR_TO_SRC_CONTAINER;
+                        targetToSourceData.ngap_data = &ngapData;
+
+                        memset(&UeContextCreatedData, 0,
+                                sizeof(UeContextCreatedData));
+                        UeContextCreatedData.ue_context = &UeContext;
+                        UeContextCreatedData.target_to_source_data =
+                                &targetToSourceData;
+                        UeContextCreatedData.pdu_session_list =
+                                OpenAPI_list_create();
+
+                        memset(&sendmsg, 0, sizeof(sendmsg));
+                        sendmsg.UeContextCreatedData = &UeContextCreatedData;
+
+                        /* TargetToSource container */
+                        container_pkbuf = ogs_pkbuf_alloc(NULL,
+                                amf_ue->handover.container.size);
+                        ogs_assert(container_pkbuf);
+                        ogs_pkbuf_put_data(container_pkbuf,
+                                amf_ue->handover.container.buf,
+                                amf_ue->handover.container.size);
+
+                        sendmsg.part[sendmsg.num_of_part].pkbuf =
+                                container_pkbuf;
+                        sendmsg.part[sendmsg.num_of_part].content_id =
+                                (char *)"ngap-tar-to-src";
+                        sendmsg.part[sendmsg.num_of_part].content_type =
+                                (char *)OGS_SBI_CONTENT_NGAP_TYPE;
+                        sendmsg.num_of_part++;
+
+                        /* Per-session HandoverCommandTransfer */
+                        {
+                            amf_sess_t *ho_sess = NULL;
+                            ogs_list_for_each(
+                                    &amf_ue->sess_list, ho_sess) {
+                                OpenAPI_n2_sm_information_t *N2SmInfo = NULL;
+                                OpenAPI_n2_info_content_t *n2Info = NULL;
+                                OpenAPI_ref_to_binary_data_t *ref = NULL;
+                                ogs_pkbuf_t *cmd_pkbuf = NULL;
+                                char cid[32];
+
+                                if (!ho_sess->transfer.handover_command)
+                                    continue;
+
+                                if (sendmsg.num_of_part >=
+                                        OGS_SBI_MAX_NUM_OF_PART) {
+                                    ogs_warn("Too many parts, skip PSI[%d]",
+                                            ho_sess->psi);
+                                    break;
+                                }
+
+                                ogs_snprintf(cid, sizeof(cid),
+                                        "n2-sm-cmd-psi-%d", ho_sess->psi);
+
+                                ref = ogs_calloc(1, sizeof(*ref));
+                                ogs_assert(ref);
+                                ref->content_id = ogs_strdup(cid);
+
+                                n2Info = ogs_calloc(1, sizeof(*n2Info));
+                                ogs_assert(n2Info);
+                                n2Info->ngap_ie_type =
+                                    OpenAPI_ngap_ie_type_HANDOVER_CMD;
+                                n2Info->ngap_data = ref;
+
+                                N2SmInfo = ogs_calloc(1, sizeof(*N2SmInfo));
+                                ogs_assert(N2SmInfo);
+                                N2SmInfo->pdu_session_id = ho_sess->psi;
+                                N2SmInfo->n2_info_content = n2Info;
+
+                                OpenAPI_list_add(
+                                    UeContextCreatedData.pdu_session_list,
+                                    N2SmInfo);
+
+                                cmd_pkbuf = ogs_pkbuf_alloc(NULL,
+                                    ho_sess->transfer.handover_command->len);
+                                ogs_assert(cmd_pkbuf);
+                                ogs_pkbuf_put_data(cmd_pkbuf,
+                                    ho_sess->transfer.handover_command->data,
+                                    ho_sess->transfer.handover_command->len);
+
+                                sendmsg.part[sendmsg.num_of_part].pkbuf =
+                                        cmd_pkbuf;
+                                sendmsg.part[sendmsg.num_of_part].content_id =
+                                        ogs_strdup(cid);
+                                sendmsg.part[sendmsg.num_of_part].content_type =
+                                        (char *)OGS_SBI_CONTENT_NGAP_TYPE;
+                                sendmsg.num_of_part++;
+
+                                ogs_info("[%s:%d] Added HandoverCommandTransfer"
+                                        " to CreateUEContext 201",
+                                        amf_ue->supi, ho_sess->psi);
+                            }
+                        }
+
+                        response = ogs_sbi_build_response(&sendmsg,
+                                OGS_SBI_HTTP_STATUS_CREATED);
+                        ogs_assert(response);
+                        ogs_assert(true ==
+                            ogs_sbi_server_send_response(stream201, response));
+
+                        ogs_pkbuf_free(container_pkbuf);
+
+                        /* Free additional multipart parts */
+                        {
+                            int pi;
+                            for (pi = 1; pi < sendmsg.num_of_part; pi++) {
+                                if (sendmsg.part[pi].pkbuf)
+                                    ogs_pkbuf_free(sendmsg.part[pi].pkbuf);
+                                if (sendmsg.part[pi].content_id)
+                                    ogs_free(sendmsg.part[pi].content_id);
+                            }
+                        }
+
+                        /* Free N2SmInformation items */
+                        {
+                            OpenAPI_lnode_t *node = NULL;
+                            OpenAPI_list_for_each(
+                                UeContextCreatedData.pdu_session_list, node) {
+                                OpenAPI_n2_sm_information_free(
+                                    (OpenAPI_n2_sm_information_t *)node->data);
+                            }
+                        }
+                        OpenAPI_list_free(
+                                UeContextCreatedData.pdu_session_list);
+
+                        AMF_UE_CLEAR_N2_TRANSFER(amf_ue, handover_command);
+
+                        ogs_info("[%s] CreateUEContext 201 sent (PREPARED)",
+                                amf_ue->supi);
+                    }
+                } else {
+                    if (AMF_SESSION_SYNC_DONE(amf_ue, state)) {
+                        r = ngap_send_handover_command(amf_ue);
+                        ogs_expect(r == OGS_OK);
+                        ogs_assert(r != OGS_ERROR);
+
+                        AMF_UE_CLEAR_N2_TRANSFER(amf_ue, handover_command);
+                    }
                 }
                 break;
 
@@ -883,6 +1057,29 @@ int amf_nsmf_pdusession_handle_update_sm_context(
 
                 /* Not reached here */
                 ogs_assert_if_reached();
+
+            } else if (state ==
+                    AMF_UPDATE_SM_CONTEXT_INTER_PLMN_HANDOVER_PREPARED) {
+
+                /* Error on UpdateSMContext(PREPARED) for V-SMF insertion.
+                 * Send error for deferred CreateUEContext. */
+                ogs_warn("[%s:%d] UpdateSMContext(PREPARED) to V-SMF failed",
+                        amf_ue->supi, sess->psi);
+                if (AMF_SESSION_SYNC_DONE(amf_ue, state)) {
+                    ogs_sbi_stream_t *stream201 = NULL;
+                    stream201 = ogs_sbi_stream_find_by_id(
+                            amf_ue->create_ue_context_stream_id);
+                    if (stream201) {
+                        ogs_assert(true == ogs_sbi_server_send_error(
+                                stream201,
+                                OGS_SBI_HTTP_STATUS_INTERNAL_SERVER_ERROR,
+                                NULL,
+                                "V-SMF UpdateSMContext(PREPARED) failed",
+                                NULL, NULL));
+                    }
+                    amf_ue->create_ue_context_stream_id =
+                            OGS_INVALID_POOL_ID;
+                }
 
             } else if (state ==
                     AMF_UPDATE_SM_CONTEXT_INTER_PLMN_HANDOVER_NOTIFY) {

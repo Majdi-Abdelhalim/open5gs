@@ -2709,13 +2709,67 @@ int amf_namf_comm_handle_create_ue_context_response(
         }
 
         if (!hr_sessions_pending) {
-            /* LBO-only or V-SMF insertion: send HandoverCommand immediately */
+            /*
+             * LBO-only or V-SMF insertion: send HandoverCommand immediately.
+             *
+             * For V-SMF insertion, the 201 may contain per-session
+             * HandoverCommandTransfer from T-AMF's V-SMF. Store them
+             * in sess->transfer.handover_command so the HandoverCommand
+             * includes PDUSessionResourceHandoverList.
+             */
+            if (ue_at_home &&
+                    CreatedData->pdu_session_list &&
+                    CreatedData->pdu_session_list->count > 0) {
+                OpenAPI_lnode_t *node = NULL;
+                OpenAPI_list_for_each(CreatedData->pdu_session_list, node) {
+                    OpenAPI_n2_sm_information_t *N2SmInfo = node->data;
+                    amf_sess_t *ho_sess = NULL;
+                    ogs_pkbuf_t *cmd_buf = NULL;
+
+                    if (!N2SmInfo) continue;
+
+                    ho_sess = amf_sess_find_by_psi(
+                            amf_ue, N2SmInfo->pdu_session_id);
+                    if (!ho_sess) {
+                        ogs_warn("[%s] Cannot find PSI[%d] for HO cmd",
+                                amf_ue->supi, N2SmInfo->pdu_session_id);
+                        continue;
+                    }
+
+                    if (!N2SmInfo->n2_info_content ||
+                            !N2SmInfo->n2_info_content->ngap_data ||
+                            !N2SmInfo->n2_info_content->ngap_data->content_id) {
+                        ogs_warn("[%s:%d] No N2 info content in cmd",
+                                amf_ue->supi, ho_sess->psi);
+                        continue;
+                    }
+
+                    cmd_buf = ogs_sbi_find_part_by_content_id(recvmsg,
+                            N2SmInfo->n2_info_content->ngap_data->content_id);
+                    if (!cmd_buf) {
+                        ogs_warn("[%s:%d] No binary cmd transfer",
+                                amf_ue->supi, ho_sess->psi);
+                        continue;
+                    }
+
+                    AMF_SESS_STORE_N2_TRANSFER(
+                            ho_sess, handover_command,
+                            ogs_pkbuf_copy(cmd_buf));
+
+                    ogs_info("[%s:%d] Stored HandoverCommandTransfer "
+                            "from 201", amf_ue->supi, ho_sess->psi);
+                }
+            }
+
             r = ngap_send_handover_command(amf_ue);
             if (r != OGS_OK) {
                 ogs_error("[%s] ngap_send_handover_command() failed",
                         amf_ue->supi);
+                AMF_UE_CLEAR_N2_TRANSFER(amf_ue, handover_command);
                 goto failure;
             }
+
+            AMF_UE_CLEAR_N2_TRANSFER(amf_ue, handover_command);
 
             ogs_info("[%s] HandoverCommand sent to source gNB (inter-AMF)",
                     amf_ue->supi);

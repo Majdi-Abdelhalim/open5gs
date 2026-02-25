@@ -618,3 +618,29 @@ sleep 3
 3. **`smf_nsmf_handle_created_data_in_vsmf()` modifications**: Two sections wrapped in `if (!sess->ho_state_preparing)` — (a) N1 SM check/decode around lines 1920-1940, and (b) NAS message handling + PFCP modification around lines 2230-2258. During HO, the V-SMF skips N1 SM parsing and does not send PFCP modification request (no QoS flow modification needed during preparation).
 
 4. **Deferred 201 to T-AMF**: In `gsm-sm.c` operational state `OGS_FSM_ENTRY_SIG`/`SBI_CLIENT DEFAULT`, after `smf_nsmf_handle_created_data_in_vsmf()` succeeds for HO, the V-SMF calls `smf_sbi_send_sm_context_created_data_ho_preparing()` to send the deferred 201 response to the T-AMF. This was implied but not explicitly detailed in the plan.
+
+### Phase 6 Deviations
+
+1. **No separate helper function for CreateUEContext 201**: The plan suggested the T-AMF
+   handle V-SMF PREPARED and coordinate with H-SMF for forwarding tunnel setup. In practice,
+   the V-SMF's existing `ngap_handle_handover_request_ack()` handler already works correctly
+   for the V-SMF case: it decodes the HandoverRequestAcknowledgeTransfer, stores the target
+   gNB's N3 F-TEID, and builds a HandoverCommandTransfer response. No separate H-SMF
+   coordination was needed during PREPARED (forwarding tunnels are optional and not used
+   in this simplified flow).
+
+2. **CreateUEContext 201 built inline in nsmf-handler.c**: Rather than creating a shared
+   helper function callable from both ngap-handler.c and nsmf-handler.c, the 201 response
+   builder is inlined in the `AMF_UPDATE_SM_CONTEXT_INTER_PLMN_HANDOVER_PREPARED` handler
+   in `nsmf-handler.c`. The ngap-handler.c only retains a simplified fallback for the
+   edge case of no admitted PDU sessions.
+
+3. **S-AMF stores per-session HandoverCommandTransfer from 201**: The plan item 4
+   (S-AMF handling) now stores per-session N2 SM from the CreateUEContext 201 response
+   into `sess->transfer.handover_command` before calling `ngap_send_handover_command()`.
+   This ensures the HandoverCommand sent to the source gNB includes the
+   PDUSessionResourceHandoverList with HandoverCommandTransfer per session.
+
+4. **New state `AMF_UPDATE_SM_CONTEXT_INTER_PLMN_HANDOVER_PREPARED = 32`**: Added in
+   `sbi-path.h`. Error handling sends 500 error on the deferred CreateUEContext stream
+   if any V-SMF PREPARED response fails.

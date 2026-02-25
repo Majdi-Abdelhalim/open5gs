@@ -3916,18 +3916,10 @@ void ngap_handle_handover_request_ack(
      */
     amf_ue = amf_ue_find_by_id(target_ue->amf_ue_id);
     if (amf_ue && amf_ue->inter_amf_handover) {
-        ogs_sbi_stream_t *stream = NULL;
-        ogs_sbi_message_t sendmsg;
-        ogs_sbi_response_t *response = NULL;
-        OpenAPI_ue_context_created_data_t UeContextCreatedData;
-        OpenAPI_ue_context_t UeContext;
-        OpenAPI_n2_info_content_t targetToSourceData;
-        OpenAPI_ref_to_binary_data_t ngapData;
-        ogs_pkbuf_t *container_pkbuf = NULL;
-
         ogs_info("[HandoverRequestAck] Inter-AMF for [%s]", amf_ue->supi);
 
         if (!TargetToSource_TransparentContainer) {
+            ogs_sbi_stream_t *stream = NULL;
             ogs_error("No TargetToSource_TransparentContainer");
             stream = ogs_sbi_stream_find_by_id(
                     amf_ue->create_ue_context_stream_id);
@@ -3946,64 +3938,18 @@ void ngap_handle_handover_request_ack(
         OGS_ASN_STORE_DATA(&amf_ue->handover.container,
                 TargetToSource_TransparentContainer);
 
-        /* Recover deferred SBI stream */
-        stream = ogs_sbi_stream_find_by_id(
-                amf_ue->create_ue_context_stream_id);
-        if (!stream) {
-            ogs_error("Cannot find deferred CreateUEContext stream");
-            return;
-        }
-        amf_ue->create_ue_context_stream_id = OGS_INVALID_POOL_ID;
-
-        /* Build UeContextCreatedData response */
-        memset(&UeContext, 0, sizeof(UeContext));
-        UeContext.supi = amf_ue->supi;
-
-        memset(&ngapData, 0, sizeof(ngapData));
-        ngapData.content_id = (char *)"ngap-tar-to-src";
-
-        memset(&targetToSourceData, 0, sizeof(targetToSourceData));
-        targetToSourceData.ngap_ie_type =
-                OpenAPI_ngap_ie_type_TAR_TO_SRC_CONTAINER;
-        targetToSourceData.ngap_data = &ngapData;
-
-        memset(&UeContextCreatedData, 0, sizeof(UeContextCreatedData));
-        UeContextCreatedData.ue_context = &UeContext;
-        UeContextCreatedData.target_to_source_data = &targetToSourceData;
-        UeContextCreatedData.pdu_session_list = OpenAPI_list_create();
-
-        memset(&sendmsg, 0, sizeof(sendmsg));
-        sendmsg.UeContextCreatedData = &UeContextCreatedData;
-
-        /* Add TargetToSource container as binary multipart part */
-        container_pkbuf = ogs_pkbuf_alloc(NULL,
-                TargetToSource_TransparentContainer->size);
-        ogs_assert(container_pkbuf);
-        ogs_pkbuf_put_data(container_pkbuf,
-                TargetToSource_TransparentContainer->buf,
-                TargetToSource_TransparentContainer->size);
-
-        sendmsg.part[sendmsg.num_of_part].pkbuf = container_pkbuf;
-        sendmsg.part[sendmsg.num_of_part].content_id =
-                (char *)"ngap-tar-to-src";
-        sendmsg.part[sendmsg.num_of_part].content_type =
-                (char *)OGS_SBI_CONTENT_NGAP_TYPE;
-        sendmsg.num_of_part++;
-
         /*
-         * Phase 1C: Include per-session HandoverRequestAckTransfer
-         * in the CreateUEContext 201 response as N2SmInformation items
-         * with multipart binary parts.
+         * Phase 6: Send UpdateSMContext(hoState=PREPARED) to V-SMF for
+         * each PDU session. The V-SMF will process the
+         * HandoverRequestAcknowledgeTransfer and return
+         * HandoverCommandTransfer. Once all sessions respond,
+         * send CreateUEContext 201 to S-AMF.
          */
-        if (PDUSessionList) {
+        if (PDUSessionList && PDUSessionList->list.count > 0) {
             int j;
             for (j = 0; j < PDUSessionList->list.count; j++) {
                 amf_sess_t *sess = NULL;
-                OpenAPI_n2_sm_information_t *N2SmInfo = NULL;
-                OpenAPI_n2_info_content_t *n2InfoContent = NULL;
-                OpenAPI_ref_to_binary_data_t *refToBinaryData = NULL;
-                ogs_pkbuf_t *ack_pkbuf = NULL;
-                char content_id[32];
+                amf_nsmf_pdusession_sm_context_param_t param;
 
                 PDUSessionItem =
                     (NGAP_PDUSessionResourceAdmittedItem_t *)
@@ -4018,91 +3964,111 @@ void ngap_handle_handover_request_ack(
                 sess = amf_sess_find_by_psi(amf_ue,
                         PDUSessionItem->pDUSessionID);
                 if (!sess) {
-                    ogs_warn("[%s] Cannot find PSI[%d] for ack transfer",
+                    ogs_warn("[%s] Cannot find PSI[%d] for PREPARED",
                             amf_ue->supi,
                             (int)PDUSessionItem->pDUSessionID);
                     continue;
                 }
 
-                if (sendmsg.num_of_part >= OGS_SBI_MAX_NUM_OF_PART) {
-                    ogs_warn("Too many multipart parts, "
-                            "skipping PSI[%d]", sess->psi);
-                    break;
+                if (!SESSION_CONTEXT_IN_SMF(sess)) {
+                    ogs_warn("[%s:%d] Session not in SMF",
+                            amf_ue->supi, sess->psi);
+                    continue;
                 }
 
-                ogs_snprintf(content_id, sizeof(content_id),
-                        "n2-sm-ack-psi-%d", sess->psi);
-
-                refToBinaryData =
-                        ogs_calloc(1, sizeof(*refToBinaryData));
-                ogs_assert(refToBinaryData);
-                refToBinaryData->content_id = ogs_strdup(content_id);
-
-                n2InfoContent = ogs_calloc(1, sizeof(*n2InfoContent));
-                ogs_assert(n2InfoContent);
-                n2InfoContent->ngap_ie_type =
-                        OpenAPI_ngap_ie_type_HANDOVER_CMD;
-                n2InfoContent->ngap_data = refToBinaryData;
-
-                N2SmInfo = ogs_calloc(1, sizeof(*N2SmInfo));
-                ogs_assert(N2SmInfo);
-                N2SmInfo->pdu_session_id = sess->psi;
-                N2SmInfo->n2_info_content = n2InfoContent;
-
-                OpenAPI_list_add(
-                        UeContextCreatedData.pdu_session_list, N2SmInfo);
-
-                /* Add ack transfer as multipart binary part */
-                ack_pkbuf = ogs_pkbuf_alloc(NULL, transfer->size);
-                ogs_assert(ack_pkbuf);
-                ogs_pkbuf_put_data(ack_pkbuf,
+                /* Send UpdateSMContext(PREPARED) with
+                 * HandoverRequestAcknowledgeTransfer to V-SMF */
+                memset(&param, 0, sizeof(param));
+                param.n2smbuf = ogs_pkbuf_alloc(NULL, transfer->size);
+                ogs_assert(param.n2smbuf);
+                ogs_pkbuf_put_data(param.n2smbuf,
                         transfer->buf, transfer->size);
+                param.n2SmInfoType =
+                        OpenAPI_n2_sm_info_type_HANDOVER_REQ_ACK;
+                param.hoState = OpenAPI_ho_state_PREPARED;
 
-                sendmsg.part[sendmsg.num_of_part].pkbuf = ack_pkbuf;
-                sendmsg.part[sendmsg.num_of_part].content_id =
-                        ogs_strdup(content_id);
-                sendmsg.part[sendmsg.num_of_part].content_type =
-                        (char *)OGS_SBI_CONTENT_NGAP_TYPE;
-                sendmsg.num_of_part++;
+                r = amf_sess_sbi_discover_and_send(
+                        OGS_SBI_SERVICE_TYPE_NSMF_PDUSESSION, NULL,
+                        amf_nsmf_pdusession_build_update_sm_context,
+                        target_ue, sess,
+                        AMF_UPDATE_SM_CONTEXT_INTER_PLMN_HANDOVER_PREPARED,
+                        &param);
+                ogs_expect(r == OGS_OK);
+                ogs_assert(r != OGS_ERROR);
 
-                ogs_info("[%s:%d] Added ack transfer to "
-                        "CreateUEContext 201",
+                ogs_pkbuf_free(param.n2smbuf);
+
+                ogs_info("[%s:%d] Sent UpdateSMContext(PREPARED) to V-SMF",
                         amf_ue->supi, sess->psi);
             }
-        }
+        } else {
+            /*
+             * No PDU sessions admitted — send CreateUEContext 201
+             * immediately with just the TargetToSource container.
+             */
+            ogs_sbi_stream_t *stream = NULL;
+            ogs_sbi_message_t sendmsg;
+            ogs_sbi_response_t *response = NULL;
+            OpenAPI_ue_context_created_data_t UeContextCreatedData;
+            OpenAPI_ue_context_t UeContext;
+            OpenAPI_n2_info_content_t targetToSourceData;
+            OpenAPI_ref_to_binary_data_t ngapData;
+            ogs_pkbuf_t *container_pkbuf = NULL;
 
-        response = ogs_sbi_build_response(&sendmsg,
-                OGS_SBI_HTTP_STATUS_CREATED);
-        ogs_assert(response);
-        ogs_assert(true ==
-                ogs_sbi_server_send_response(stream, response));
-
-        ogs_pkbuf_free(container_pkbuf);
-
-        /* Free additional multipart parts (ack transfers) */
-        {
-            int pi;
-            for (pi = 1; pi < sendmsg.num_of_part; pi++) {
-                if (sendmsg.part[pi].pkbuf)
-                    ogs_pkbuf_free(sendmsg.part[pi].pkbuf);
-                if (sendmsg.part[pi].content_id)
-                    ogs_free(sendmsg.part[pi].content_id);
+            stream = ogs_sbi_stream_find_by_id(
+                    amf_ue->create_ue_context_stream_id);
+            if (!stream) {
+                ogs_error("Cannot find deferred CreateUEContext stream");
+                return;
             }
+            amf_ue->create_ue_context_stream_id = OGS_INVALID_POOL_ID;
+
+            memset(&UeContext, 0, sizeof(UeContext));
+            UeContext.supi = amf_ue->supi;
+
+            memset(&ngapData, 0, sizeof(ngapData));
+            ngapData.content_id = (char *)"ngap-tar-to-src";
+
+            memset(&targetToSourceData, 0, sizeof(targetToSourceData));
+            targetToSourceData.ngap_ie_type =
+                    OpenAPI_ngap_ie_type_TAR_TO_SRC_CONTAINER;
+            targetToSourceData.ngap_data = &ngapData;
+
+            memset(&UeContextCreatedData, 0, sizeof(UeContextCreatedData));
+            UeContextCreatedData.ue_context = &UeContext;
+            UeContextCreatedData.target_to_source_data = &targetToSourceData;
+            UeContextCreatedData.pdu_session_list = OpenAPI_list_create();
+
+            memset(&sendmsg, 0, sizeof(sendmsg));
+            sendmsg.UeContextCreatedData = &UeContextCreatedData;
+
+            container_pkbuf = ogs_pkbuf_alloc(NULL,
+                    TargetToSource_TransparentContainer->size);
+            ogs_assert(container_pkbuf);
+            ogs_pkbuf_put_data(container_pkbuf,
+                    TargetToSource_TransparentContainer->buf,
+                    TargetToSource_TransparentContainer->size);
+
+            sendmsg.part[sendmsg.num_of_part].pkbuf = container_pkbuf;
+            sendmsg.part[sendmsg.num_of_part].content_id =
+                    (char *)"ngap-tar-to-src";
+            sendmsg.part[sendmsg.num_of_part].content_type =
+                    (char *)OGS_SBI_CONTENT_NGAP_TYPE;
+            sendmsg.num_of_part++;
+
+            response = ogs_sbi_build_response(&sendmsg,
+                    OGS_SBI_HTTP_STATUS_CREATED);
+            ogs_assert(response);
+            ogs_assert(true ==
+                    ogs_sbi_server_send_response(stream, response));
+
+            ogs_pkbuf_free(container_pkbuf);
+            OpenAPI_list_free(UeContextCreatedData.pdu_session_list);
+
+            ogs_info("[HandoverRequestAck] CreateUEContext 201 sent "
+                    "(no sessions) for [%s]", amf_ue->supi);
         }
 
-        /* Free N2SmInformation items in pdu_session_list */
-        {
-            OpenAPI_lnode_t *node = NULL;
-            OpenAPI_list_for_each(
-                    UeContextCreatedData.pdu_session_list, node) {
-                OpenAPI_n2_sm_information_free(
-                        (OpenAPI_n2_sm_information_t *)node->data);
-            }
-        }
-        OpenAPI_list_free(UeContextCreatedData.pdu_session_list);
-
-        ogs_info("[HandoverRequestAck] CreateUEContext 201 sent for [%s]",
-                amf_ue->supi);
         return;
     }
 
