@@ -1612,6 +1612,19 @@ int amf_nsmf_pdusession_handle_release_sm_context(
             ogs_assert(r != OGS_ERROR);
         }
 
+    } else if (state ==
+                AMF_RELEASE_SM_CONTEXT_INTER_PLMN_HANDOVER_FAILURE) {
+        /*
+         * Phase 9: V-SMF session release after inter-AMF HO failure.
+         * When all V-SMF sessions are released, remove the UE context.
+         */
+        if (AMF_SESSION_SYNC_DONE(amf_ue,
+                AMF_RELEASE_SM_CONTEXT_INTER_PLMN_HANDOVER_FAILURE)) {
+            ogs_info("[%s] All V-SMF sessions released after HO failure, "
+                    "removing UE context", amf_ue->supi);
+            amf_ue_remove(amf_ue);
+        }
+
     } else {
 
         if (AMF_SESSION_SYNC_DONE(amf_ue, state)) {

@@ -4281,12 +4281,14 @@ void ngap_handle_handover_failure(
 
     /*
      * Inter-AMF handover failure: respond to deferred CreateUEContext
-     * with error and clean up the UE context.
+     * with error, release V-SMF sessions, and clean up UE context.
      */
     {
         amf_ue_t *amf_ue_check = amf_ue_find_by_id(target_ue->amf_ue_id);
         if (amf_ue_check && amf_ue_check->inter_amf_handover) {
             ogs_sbi_stream_t *stream = NULL;
+            amf_sess_t *sess = NULL;
+            bool has_sessions = false;
 
             ogs_warn("[HandoverFailure] Inter-AMF for [%s]",
                     amf_ue_check->supi);
@@ -4300,8 +4302,31 @@ void ngap_handle_handover_failure(
             }
             amf_ue_check->create_ue_context_stream_id = OGS_INVALID_POOL_ID;
 
-            amf_ue_remove(amf_ue_check);
+            /*
+             * Phase 9: Release V-SMF sessions created during HO.
+             * V-SMF will release V-UPF N4 and notify H-SMF.
+             * amf_ue is kept alive until release responses arrive.
+             */
+            ogs_list_for_each(&amf_ue_check->sess_list, sess) {
+                if (!SESSION_CONTEXT_IN_SMF(sess)) continue;
+
+                ogs_info("[%s:%d] Releasing V-SMF session after HO failure",
+                        amf_ue_check->supi, sess->psi);
+                amf_sbi_send_release_session(
+                        target_ue, sess,
+                        AMF_RELEASE_SM_CONTEXT_INTER_PLMN_HANDOVER_FAILURE,
+                        NULL);
+                has_sessions = true;
+            }
+
             ran_ue_remove(target_ue);
+
+            if (!has_sessions) {
+                /* No V-SMF sessions to release — clean up immediately */
+                amf_ue_remove(amf_ue_check);
+            }
+            /* else: amf_ue will be removed by release response handler */
+
             return;
         }
     }

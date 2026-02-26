@@ -1117,6 +1117,24 @@ bool smf_nsmf_handle_update_sm_context(
                 dl_far->handover.prepared = false;
             }
 
+            /*
+             * Phase 9: If H-SMF has a V-SMF reference from V-SMF insertion
+             * (§4.23.7), clear it so H-SMF reverts to non-roaming mode.
+             * V-SMF cleanup is handled separately by T-AMF UE context release.
+             */
+            if (HOME_ROUTED_ROAMING_IN_HSMF(sess)) {
+                ogs_info("[%s:%d] H-SMF HO CANCELLED: clearing V-SMF reference",
+                        smf_ue->supi, sess->psi);
+                if (sess->vsmf_pdu_session_uri) {
+                    ogs_free(sess->vsmf_pdu_session_uri);
+                    sess->vsmf_pdu_session_uri = NULL;
+                }
+                if (sess->v_smf.client) {
+                    ogs_sbi_client_remove(sess->v_smf.client);
+                    sess->v_smf.client = NULL;
+                }
+            }
+
             if (smf_sess_have_indirect_data_forwarding(sess) == true) {
                 ogs_assert(OGS_OK ==
                     smf_5gc_pfcp_send_all_pdr_modification_request(

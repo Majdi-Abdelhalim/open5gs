@@ -666,3 +666,27 @@ sleep 3
    Added in `sbi-path.h` for the T-AMF's V-SMF COMPLETED response handling. Error
    handler just logs a warning (handover is already committed at this point).
 
+### Phase 9 Deviations (recorded 2025-02-26)
+
+1. **T-AMF HandoverFailure: async V-SMF release instead of immediate UE removal**:
+   The plan suggested T-AMF release V-SMF and remove UE context. In implementation,
+   T-AMF sends ReleaseSMContext to V-SMF for each HR session, removes ran_ue immediately,
+   but keeps amf_ue alive until V-SMF release responses arrive. New state
+   `AMF_RELEASE_SM_CONTEXT_INTER_PLMN_HANDOVER_FAILURE = 36` handles the async cleanup.
+   If no sessions exist, amf_ue is removed immediately as before.
+
+2. **V-SMF CANCELLED handler NOT extended for V-SMF insertion release**: The plan asked
+   to extend V-SMF's CANCELLED handler to release V-UPF N4 and notify H-SMF. However,
+   in the current flow, V-SMF never receives CANCELLED directly — S-AMF sends CANCELLED
+   to H-SMF instead. V-SMF cleanup happens via T-AMF's UE context release (ReleaseSMContext).
+   The existing V-SMF ReleaseSMContext handler already handles V-UPF release and H-SMF
+   notification for HOME_ROUTED_ROAMING_IN_VSMF sessions.
+
+3. **H-SMF CANCELLED handler: clear V-SMF reference**: Added cleanup of
+   `vsmf_pdu_session_uri` and `v_smf.client` when H-SMF receives CANCELLED and has a
+   V-SMF reference from V-SMF insertion. This reverts H-SMF to non-roaming mode.
+
+4. **Test4/test5 NOT modified**: Tests already pass as-is. Test4 (cancel) relies on
+   S-AMF→H-SMF CANCELLED + visiting gNB UE release for T-AMF cleanup. Test5 (failure)
+   now properly releases V-SMF sessions before UE removal.
+
