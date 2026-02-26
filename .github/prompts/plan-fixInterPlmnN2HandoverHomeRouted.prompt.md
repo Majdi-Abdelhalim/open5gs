@@ -690,3 +690,25 @@ sleep 3
    S-AMF→H-SMF CANCELLED + visiting gNB UE release for T-AMF cleanup. Test5 (failure)
    now properly releases V-SMF sessions before UE removal.
 
+### Phase 10 Deviations (recorded 2025-02-26)
+
+1. **Pcap tshark verification limited**: tshark cannot decode h2c (HTTP/2 cleartext with
+   prior knowledge) traffic from open5gs. The `-d 'tcp.port==80,http2'` decode-as option
+   partially works (PATCH/status codes visible) but POST paths with HPACK-compressed
+   headers are not decoded. Pcap captured successfully (37KB, `handover_phase10_hr_test.pcap`)
+   but full SBI message flow verification requires Wireshark GUI with manual h2c decode
+   configuration. TCP connection patterns to Home (127.0.1.x) and Visited (127.0.2.x)
+   NFs are visible and confirm inter-PLMN traffic occurs.
+
+2. **LBO SCTP transient failure after HR tests**: Running LBO tests immediately after HR
+   tests causes SCTP connection refused to Visiting AMF (127.0.2.5:38412). This is a
+   transient issue — killing and restarting NFs resolves it. LBO tests pass 5/5 after
+   NF restart. Not a code issue.
+
+3. **Documentation updates more extensive than planned**: The pcap verification doc's HR
+   sections were fully rewritten (not just appended) to describe V-SMF insertion flows
+   per implementation: T-AMF→V-SMF CreateSMContext, V-SMF→H-SMF Create through SEPP,
+   RANStatusTransfer forwarding, V-UPF N4 path switch, cancel/failure rollback. The
+   summary checklist HR-Specific section was rewritten with 8 items. SEPP Direction
+   Summary extended with V-SMF→H-SMF path.
+

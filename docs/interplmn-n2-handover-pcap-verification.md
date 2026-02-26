@@ -349,106 +349,153 @@ For a successful inter-PLMN N2 handover, verify ALL of the following:
 - [ ] **PDU session release after handover**: `sm-contexts/{id}/release` appears
       after N2InfoNotify
 
-### HR-Specific
+### HR-Specific (V-SMF Insertion)
+- [ ] **V-SMF CreateSMContext**: POST `/nsmf-pdusession/v1/sm-contexts` to
+      V-SMF (`127.0.2.4`) with `hoState: PREPARING` after CreateUEContext arrives
+- [ ] **V-SMF → H-SMF Create through SEPP**: POST `/nsmf-pdusession/v1/pdu-sessions`
+      with `ho_preparation_indication` routed through SCP→SEPP to H-SMF (`127.0.1.4`)
 - [ ] **PDU sessions in HandoverRequest**: PDUSessionResourceSetupListHOReq
-      contains transferred sessions with N2 SM Info from V-SMF
-- [ ] **V-SMF HANDOVER_REQUIRED**: `sm-contexts/{id}/modify` with
-      `hoState: PREPARING` appears before CreateUEContext
-- [ ] **V-SMF HANDOVER_REQ_ACK**: `sm-contexts/{id}/modify` with
-      `n2SmInfoType: HANDOVER_REQ_ACK` appears after CreateUEContext 201
-- [ ] **HandoverCommand delayed**: HandoverCommand (NGAP 12) appears only
-      after V-SMF returns HANDOVER_CMD (not immediately after CreateUEContext)
-- [ ] **V-SMF COMPLETED**: `sm-contexts/{id}/modify` with
-      `hoState: COMPLETED` appears after N2InfoNotify
-- [ ] **Session release after COMPLETED**: `sm-contexts/{id}/release` appears
-      after V-SMF COMPLETED response
+      contains V-UPF N3 info from V-SMF CreateSMContext response
+- [ ] **V-SMF UpdateSMContext PREPARED**: `sm-contexts/{id}/modify` with
+      `n2SmInfoType: HANDOVER_REQ_ACK` to V-SMF after HandoverRequestAck
+- [ ] **HandoverCommand after V-SMF**: HandoverCommand (NGAP 12) appears only
+      after V-SMF returns HANDOVER_CMD (carried in CreateUEContext 201 response)
+- [ ] **RANStatusTransfer forwarded**: NGAP 47 (Uplink) → N2InfoNotify through
+      SEPP → NGAP 48 (Downlink) between source and target gNBs
+- [ ] **V-SMF UpdateSMContext COMPLETED**: `sm-contexts/{id}/modify` with
+      `hoState: COMPLETED` to V-SMF after HandoverNotify
+- [ ] **V-UPF N4 path switch**: PFCP Session Modification on V-UPF (`127.0.2.7`)
+      for DL data path switch after COMPLETED
 
 ---
 
-## Home-Routed (HR) Handover — Additional Message Flows
+## Home-Routed (HR) Handover — V-SMF Insertion Message Flows
 
-The HR handover path includes additional V-SMF interactions not present in LBO.
-These are the key differences visible in pcap captures.
+The HR handover path uses **V-SMF insertion** per TS 23.502 §4.23.7.3. Unlike
+LBO where the source AMF contacts the SMF, in HR the **target AMF** creates a
+V-SMF session in the visited PLMN. The V-SMF then contacts the H-SMF in the
+home PLMN through SEPP.
 
-### HR Preparation Phase: V-SMF Interactions
+### HR Preparation Phase: V-SMF Insertion
 
-After HandoverRequired (NGAP 12), the Home AMF sends `UpdateSMContext` to the
-V-SMF for each HR session before sending `CreateUEContext`:
+After HandoverRequired (NGAP 12), the source (Home) AMF sends `CreateUEContext`
+to the target (Visiting) AMF. The target AMF selects a V-SMF and initiates
+the V-SMF insertion:
 
 | # | Src         | Dst         | Port | Protocol | Message                       |
 |---|-------------|-------------|------|----------|-------------------------------|
 | 1 | 127.0.0.2   | 127.0.1.5   | SCTP | NGAP 12  | HandoverRequired (src gNB → Home AMF) |
-| 2 | 127.0.0.1   | 127.0.1.200 | 7777 | SBI      | POST .../sm-contexts/{id}/modify hoState=PREPARING (AMF→SCP) |
-| 3 | 127.0.0.1   | 127.0.1.4   |  80  | SBI      | POST .../sm-contexts/{id}/modify (SCP→V-SMF) |
-|   |             |             |      |          | *V-SMF returns N2 SM Info (PDUSessionResourceSetupRequestTransfer)* |
-| 4 | 127.0.0.1   | 127.0.1.200 | 7777 | SBI      | POST /namf-comm/v1/ue-contexts/{imsi} (CreateUEContext with PDU sessions) |
+| 2 | 127.0.0.1   | 127.0.1.200 | 7777 | SBI      | POST /namf-comm/v1/ue-contexts/{imsi} (CreateUEContext Home AMF→SCP) |
+|   |             |             |      |          | *(5-hop SEPP chain to Visiting AMF, see Phase 2d above)* |
+| 3 | 127.0.0.1   | 127.0.2.200 | 7777 | SBI      | POST /nsmf-pdusession/v1/sm-contexts (T-AMF→SCP→V-SMF CreateSMContext PREPARING) |
+| 4 | 127.0.0.1   | 127.0.2.4   |  80  | SBI      | POST /nsmf-pdusession/v1/sm-contexts (SCP→V-SMF) |
+|   |             |             |      |          | *V-SMF creates V-UPF N4 session, then contacts H-SMF:* |
+| 5 | 127.0.0.1   | 127.0.2.200 | 7777 | SBI      | POST /nsmf-pdusession/v1/pdu-sessions (V-SMF→SCP, HO Create to H-SMF) |
+|   |             |             |      |          | *(5-hop SEPP chain from Visiting PLMN → Home PLMN:* |
+|   |             |             |      |          | *V-SMF→SCP2→SEPP2→SEPP1→SCP1→H-SMF)* |
+| 6 | 127.0.0.1   | 127.0.1.4   |  80  | SBI      | POST /nsmf-pdusession/v1/pdu-sessions (SCP→H-SMF, ho_preparation_indication) |
+|   |             |             |      |          | *H-SMF stores V-SMF reference, returns 201 with session context* |
+|   |             |             |      |          | *V-SMF sends deferred 201 CREATED to T-AMF with N2 SM (V-UPF N3 info)* |
+| 7 | 127.0.2.5   | 127.0.0.3   | SCTP | NGAP 13  | **HandoverRequest** (T-AMF → target gNB, with V-UPF tunnel) |
 
-**What to verify (HR)**:
-- `sm-contexts/{id}/modify` appears BEFORE `CreateUEContext`
-- The modify request includes `hoState: PREPARING` and `n2SmInfoType: HANDOVER_REQ`
-- V-SMF response includes N2 SM binary data (PDUSessionResourceSetupRequestTransfer)
-- `CreateUEContext` request body includes `pduSessionList` with N2SmInformation entries
+**What to verify (HR V-SMF insertion)**:
+- `CreateUEContext` goes through SEPP (5 hops) before V-SMF contact
+- V-SMF CreateSMContext: POST `/nsmf-pdusession/v1/sm-contexts` to `127.0.2.4`
+- V-SMF → H-SMF Create: POST `/nsmf-pdusession/v1/pdu-sessions` through SEPP to `127.0.1.4`
+- HandoverRequest contains PDUSessionResourceSetupListHOReq with V-UPF N3 info
+- V-UPF N4 PFCP traffic visible on `127.0.2.7` (V-UPF address)
 
-### HR Handover Completion: V-SMF Ack and Command
+### HR PREPARED Phase: HandoverRequestAck + Command
 
-After `CreateUEContext` 201 response returns with per-session ack transfers, the
-Home AMF sends `UpdateSMContext(hoState=PREPARED)` for each HR session:
+After target gNB sends HandoverRequestAck, the target AMF sends
+`UpdateSMContext(hoState=PREPARED)` to V-SMF with the ack transfer. V-SMF
+returns HandoverCommandTransfer. Target AMF responds to CreateUEContext 201,
+and source AMF sends HandoverCommand:
 
 | # | Src         | Dst         | Port | Protocol | Message                       |
 |---|-------------|-------------|------|----------|-------------------------------|
-| 1 | 127.0.0.1   | 127.0.1.200 | 7777 | SBI      | POST .../sm-contexts/{id}/modify hoState=PREPARED (AMF→SCP) |
-| 2 | 127.0.0.1   | 127.0.1.4   |  80  | SBI      | POST .../sm-contexts/{id}/modify (SCP→V-SMF) |
+| 1 | 127.0.0.3   | 127.0.2.5   | SCTP | NGAP 13  | HandoverRequestAck (target gNB → T-AMF) |
+| 2 | 127.0.0.1   | 127.0.2.200 | 7777 | SBI      | POST .../sm-contexts/{id}/modify hoState=PREPARED (T-AMF→SCP) |
+| 3 | 127.0.0.1   | 127.0.2.4   |  80  | SBI      | POST .../sm-contexts/{id}/modify (SCP→V-SMF) |
 |   |             |             |      |          | *V-SMF returns HANDOVER_CMD transfer* |
-| 3 | 127.0.1.5   | 127.0.0.2   | SCTP | NGAP 12  | HandoverCommand (Home AMF → src gNB) |
+|   |             |             |      |          | *CreateUEContext 201 response back through SEPP (5 hops)* |
+| 4 | 127.0.1.5   | 127.0.0.2   | SCTP | NGAP 12  | **HandoverCommand** (Home AMF → src gNB) |
 
-**What to verify (HR)**:
-- `sm-contexts/{id}/modify` with `n2SmInfoType: HANDOVER_REQ_ACK` appears
-  AFTER `CreateUEContext` 201 response
-- V-SMF response includes `n2SmInfoType: HANDOVER_CMD` with binary transfer data
-- `HandoverCommand` (NGAP 12 successfulOutcome) is sent AFTER V-SMF responds
-  (not immediately after CreateUEContext 201 like in LBO)
+**What to verify (HR PREPARED)**:
+- `sm-contexts/{id}/modify` with `n2SmInfoType: HANDOVER_REQ_ACK` to V-SMF
+- V-SMF response includes `n2SmInfoType: HANDOVER_CMD` transfer
+- `CreateUEContext 201` includes per-session HandoverCommandTransfer
+- HandoverCommand (NGAP 12 successfulOutcome) appears AFTER V-SMF responds
 
-### HR Post-Handover: V-SMF Completion
+### HR RANStatusTransfer Phase
 
-After `N2InfoNotify(HANDOVER_COMPLETED)`, the Home AMF sends
-`UpdateSMContext(hoState=COMPLETED)` and then releases the HR session:
+After HandoverCommand, the source gNB sends UplinkRANStatusTransfer. The
+source AMF forwards it via N2InfoNotify through SEPP to the target AMF, which
+delivers DownlinkRANStatusTransfer to the target gNB:
 
 | # | Src         | Dst         | Port | Protocol | Message                       |
 |---|-------------|-------------|------|----------|-------------------------------|
-| 1 | 127.0.0.1   | 127.0.1.200 | 7777 | SBI      | POST .../sm-contexts/{id}/modify hoState=COMPLETED (AMF→SCP) |
-| 2 | 127.0.0.1   | 127.0.1.4   |  80  | SBI      | POST .../sm-contexts/{id}/modify (SCP→V-SMF) |
-| 3 | 127.0.0.1   | 127.0.1.200 | 7777 | SBI      | POST .../sm-contexts/{id}/release (AMF→SCP) |
+| 1 | 127.0.0.2   | 127.0.1.5   | SCTP | NGAP 47  | UplinkRANStatusTransfer (src gNB → Home AMF) |
+| 2 | 127.0.0.1   | 127.0.1.200 | 7777 | SBI      | POST .../n2-info-notify (RAN_STATUS, Home AMF→SCP) |
+|   |             |             |      |          | *(5-hop SEPP chain to Visiting AMF)* |
+| 3 | 127.0.2.5   | 127.0.0.3   | SCTP | NGAP 48  | DownlinkRANStatusTransfer (T-AMF → target gNB) |
+
+**What to verify (RANStatusTransfer)**:
+- NGAP 47 from `127.0.0.2` → `127.0.1.5` (source gNB → Home AMF)
+- N2InfoNotify with RAN status data through SEPP (5 hops)
+- NGAP 48 from `127.0.2.5` → `127.0.0.3` (Visiting AMF → target gNB)
+
+### HR Completion Phase: V-SMF COMPLETED + Data Path Switch
+
+After HandoverNotify from target gNB, the target AMF sends
+`UpdateSMContext(hoState=COMPLETED)` to V-SMF. V-SMF modifies V-UPF N4 to
+switch the data path. Target AMF also sends N2InfoNotify to source AMF:
+
+| # | Src         | Dst         | Port | Protocol | Message                       |
+|---|-------------|-------------|------|----------|-------------------------------|
+| 1 | 127.0.0.3   | 127.0.2.5   | SCTP | NGAP 11  | **HandoverNotify** (target gNB → T-AMF) |
+| 2 | 127.0.0.1   | 127.0.2.200 | 7777 | SBI      | POST .../sm-contexts/{id}/modify hoState=COMPLETED (T-AMF→SCP→V-SMF) |
+|   |             |             |      |          | *V-SMF modifies V-UPF N4 (DL path switch, end marker)* |
+| 3 | 127.0.0.1   | 127.0.2.200 | 7777 | SBI      | POST .../n2-info-notify (HANDOVER_COMPLETED, T-AMF→SCP→SEPP→Home AMF) |
+|   |             |             |      |          | *(5-hop SEPP chain to Home AMF)* |
 | 4 | 127.0.1.5   | 127.0.0.2   | SCTP | NGAP 41  | UEContextReleaseCommand (Home AMF → src gNB) |
 
-**What to verify (HR)**:
-- `sm-contexts/{id}/modify` with `hoState: COMPLETED` appears AFTER `N2InfoNotify`
-- Session release (`sm-contexts/{id}/release`) appears AFTER the COMPLETED response
-- UEContextReleaseCommand appears on the source gNB
+**What to verify (HR COMPLETED)**:
+- `sm-contexts/{id}/modify` with `hoState: COMPLETED` to V-SMF at `127.0.2.4`
+- PFCP Session Modification on V-UPF (`127.0.2.7`) for DL path switch
+- N2InfoNotify (HANDOVER_COMPLETED) through SEPP to Home AMF
+- Source gNB released after notification
 
 ### HR Cancel: V-SMF Rollback
 
-When `HandoverCancel` arrives after `HandoverCommand`, the Home AMF sends
-`HandoverCancelAcknowledge` immediately, then `UpdateSMContext(hoState=CANCELLED)`
-to the V-SMF:
+When `HandoverCancel` arrives after `HandoverCommand`, the source (Home) AMF
+sends `HandoverCancelAcknowledge` immediately, then sends
+`UpdateSMContext(hoState=CANCELLED)` to H-SMF which clears V-SMF reference:
 
 | # | Src         | Dst         | Port | Protocol | Message                       |
 |---|-------------|-------------|------|----------|-------------------------------|
 | 1 | 127.0.0.2   | 127.0.1.5   | SCTP | NGAP 12  | HandoverCancel (src gNB → Home AMF) |
 | 2 | 127.0.1.5   | 127.0.0.2   | SCTP | NGAP 12  | HandoverCancelAck (immediate) |
-| 3 | 127.0.0.1   | 127.0.1.200 | 7777 | SBI      | POST .../sm-contexts/{id}/modify hoState=CANCELLED |
+| 3 | 127.0.0.1   | 127.0.1.200 | 7777 | SBI      | POST .../sm-contexts/{id}/modify hoState=CANCELLED (to H-SMF) |
 
-### HR Failure: V-SMF Rollback
+**What to verify (HR Cancel)**:
+- CANCELLED sent to H-SMF (`127.0.1.4`), not to V-SMF
+- H-SMF clears V-SMF reference, reverts to non-roaming mode
+- Target AMF's UE context cleaned up via visiting gNB UE context release
+
+### HR Failure: V-SMF Release
 
 When target gNB sends `HandoverFailure` (NGAP 13 unsuccessfulOutcome), the
-Visiting AMF responds with error on `CreateUEContext`. The Home AMF sends
-`HandoverPreparationFailure` and then `UpdateSMContext(hoState=CANCELLED)`:
+target AMF releases V-SMF sessions and sends error on `CreateUEContext`.
+Source AMF sends `HandoverPreparationFailure`:
 
 | # | Src         | Dst         | Port | Protocol | Message                       |
 |---|-------------|-------------|------|----------|-------------------------------|
-| 1 | 127.0.0.3   | 127.0.2.5   | SCTP | NGAP 13  | HandoverFailure (tgt gNB → Visiting AMF) |
+| 1 | 127.0.0.3   | 127.0.2.5   | SCTP | NGAP 13  | HandoverFailure (tgt gNB → T-AMF) |
+| 2 | 127.0.0.1   | 127.0.2.200 | 7777 | SBI      | POST .../sm-contexts/{id}/release (T-AMF→V-SMF ReleaseSMContext) |
+|   |             |             |      |          | *V-SMF releases V-UPF N4, notifies H-SMF to remove V-SMF reference* |
 |   |             |             |      |          | *CreateUEContext 403 response back through SEPP* |
-| 2 | 127.0.1.5   | 127.0.0.2   | SCTP | NGAP 12  | HandoverPreparationFailure |
-| 3 | 127.0.0.1   | 127.0.1.200 | 7777 | SBI      | POST .../sm-contexts/{id}/modify hoState=CANCELLED |
+| 3 | 127.0.1.5   | 127.0.0.2   | SCTP | NGAP 12  | HandoverPreparationFailure |
 
 ---
 
@@ -462,6 +509,10 @@ CreateUEContext / NRF Discovery (Home → Visiting):
 N2InfoNotify (Visiting → Home):
   Visiting SCP → Visiting SEPP(SBI) → Home SEPP(N32) → Home SCP
   127.0.2.200  → 127.0.2.250        → 127.0.1.252    → 127.0.1.200
+
+V-SMF → H-SMF (HR V-SMF insertion, Visiting → Home):
+  V-SMF → Visiting SCP → Visiting SEPP(SBI) → Home SEPP(N32) → Home SCP → H-SMF
+  127.0.2.4 → 127.0.2.200 → 127.0.2.250 → 127.0.1.252 → 127.0.1.200 → 127.0.1.4
 ```
 
 Note: Each PLMN's SEPP has two interfaces:
@@ -507,34 +558,38 @@ Target gNB rejects HandoverRequest:
 ### HR Test Suite (n2-handover-hr)
 
 #### HR Test 1: Basic Home-Routed Handover (Single PDU Session)
-Full HR flow: HANDOVER_REQUIRED → CreateUEContext (with PDU sessions) →
-HandoverRequestAck (with admitted sessions) → HANDOVER_REQ_ACK → HANDOVER_CMD →
-HandoverCommand → HandoverNotify → N2InfoNotify → COMPLETED → release.
-Single `internet` session (PSI 5).
+Full HR V-SMF insertion flow: HandoverRequired → CreateUEContext through SEPP →
+T-AMF selects V-SMF → V-SMF CreateSMContext(PREPARING) → V-SMF contacts H-SMF
+through SEPP → HandoverRequest with V-UPF N3 → HandoverRequestAck →
+UpdateSMContext(PREPARED) → CreateUEContext 201 → HandoverCommand →
+RANStatusTransfer → HandoverNotify → UpdateSMContext(COMPLETED) → V-UPF path
+switch → N2InfoNotify → source release. Single `internet` session (PSI 5).
 
 #### HR Test 2: Indirect Forwarding Home-Routed Handover
 Same as HR Test 1 but with indirect forwarding (target gNB reports
 `data_forwarding_not_possible`). V-SMF may set up indirect forwarding tunnels
-via PFCP before returning HANDOVER_CMD.
+via V-UPF N4 before returning HANDOVER_CMD.
 
 #### HR Test 3: Multiple PDU Sessions Home-Routed
-Two HR sessions (`internet` PSI 5, `ims` PSI 6). Multiple V-SMF interactions
-in parallel — `CreateUEContext` includes both sessions, HandoverCommand waits
-for all V-SMF HANDOVER_CMD responses.
+Two HR sessions (`internet` PSI 5, `ims` PSI 6). T-AMF creates two V-SMF
+sessions — `CreateUEContext` includes both sessions, HandoverCommand waits
+for all V-SMF HANDOVER_CMD responses. Two sets of V-SMF→H-SMF SEPP hops.
 
 #### HR Test 4: Handover Cancel with HR Rollback
 Full HR preparation through HandoverCommand, then source gNB cancels:
-- V-SMF interactions for HANDOVER_REQUIRED and HANDOVER_REQ_ACK complete normally
+- V-SMF insertion completes normally (V-SMF created, H-SMF notified)
 - Source gNB sends HandoverCancel (NGAP 12 initiatingMessage)
-- Home AMF sends HandoverCancelAcknowledge immediately
-- Home AMF sends `UpdateSMContext(hoState=CANCELLED)` to V-SMF (async rollback)
-- V-SMF clears prepared handover state
+- Source (Home) AMF sends HandoverCancelAcknowledge immediately
+- Source AMF sends `UpdateSMContext(hoState=CANCELLED)` to H-SMF
+- H-SMF clears V-SMF reference, reverts to non-roaming mode
+- Target AMF's UE context cleaned up through visiting gNB release
 
 #### HR Test 5: Handover Failure with HR Rollback
-Target gNB rejects HandoverRequest after HR preparation started:
-- V-SMF interactions for HANDOVER_REQUIRED complete normally
-- CreateUEContext sent with PDU sessions to Visiting AMF
-- Target gNB sends HandoverFailure → Visiting AMF returns 403
-- Home AMF sends HandoverPreparationFailure to source gNB
-- Home AMF sends `UpdateSMContext(hoState=CANCELLED)` to V-SMF (async rollback)
+Target gNB rejects HandoverRequest after V-SMF insertion started:
+- V-SMF insertion begins (CreateSMContext PREPARING, V-SMF→H-SMF Create)
+- CreateUEContext sent through SEPP to Visiting AMF
+- Target gNB sends HandoverFailure → T-AMF releases V-SMF sessions
+- T-AMF sends ReleaseSMContext to V-SMF, V-SMF cleans up V-UPF N4
+- CreateUEContext 403 response back through SEPP
+- Source AMF sends HandoverPreparationFailure to source gNB
 - UE remains registered on Home AMF with original sessions

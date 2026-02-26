@@ -42,13 +42,16 @@ The target gNB sets up data radio bearers and responds with
 `PDUSessionResourceAdmittedList` containing per-session
 HandoverRequestAcknowledgeTransfer.
 
-## 3. RANStatusTransfer Skipped
+## 3. RANStatusTransfer for HR (Implemented)
 
-No `UplinkRANStatusTransfer` / `DownlinkRANStatusTransfer` forwarding is
-performed for inter-AMF handover. For LBO this is expected (no data radio
-bearers to transfer PDCP status for). For HR, this means PDCP sequence numbers
-are not preserved across the handover, which may cause some packet loss or
-reordering during the handover transition.
+`UplinkRANStatusTransfer` / `DownlinkRANStatusTransfer` forwarding **is
+implemented** for home-routed (HR) inter-AMF handover via `N2InfoNotify` SBI
+messages through SEPP. The source AMF forwards the RANStatusTransfer from the
+source gNB to the target AMF, which delivers it to the target gNB. This
+preserves PDCP sequence numbers across the handover for HR sessions.
+
+For **LBO**, RANStatusTransfer forwarding is not performed because there are no
+active data radio bearers to transfer PDCP status for (sessions are released).
 
 ## 4. No RegistrationStatusUpdate
 
@@ -107,24 +110,52 @@ request. The target AMF initializes its security context from these values and
 derives the next NH before sending HandoverRequest. This follows TS 33.501 but
 the NCC value is limited to 3 bits (0-7) and wraps around.
 
-## 11. HR V-SMF Interaction Timing
+## 11. HR V-SMF Insertion (§4.23.7.3)
 
-For home-routed sessions, the source AMF sends `UpdateSMContext` to the V-SMF
-at multiple points during the handover. These are serialized per session via
-the AMF's session synchronization mechanism (`AMF_SESSION_SYNC_DONE`). When
-multiple HR sessions exist, the `CreateUEContext` to the target AMF is only
-sent after ALL V-SMF responses for `HANDOVER_REQUIRED` are received, and
-`HandoverCommand` is only sent after ALL V-SMF responses for
-`HANDOVER_REQ_ACK` return `HANDOVER_CMD`.
+For home-routed sessions, the target AMF inserts a V-SMF in the visited PLMN
+during handover preparation per TS 23.502 §4.23.7.3. The flow is:
+
+1. Source AMF sends `CreateUEContext` to target AMF (no SMF contact at source)
+2. Target AMF selects a V-SMF and sends `CreateSMContext(hoState=PREPARING)`
+3. V-SMF establishes V-UPF N4 session, contacts H-SMF with
+   `ho_preparation_indication=true`, then responds with N2 SM Info
+4. Target AMF sends `HandoverRequest` with V-UPF tunnel info to target gNB
+5. After `HandoverRequestAck`, target AMF sends `UpdateSMContext(PREPARED)` to V-SMF
+6. V-SMF responds with `HandoverCommandTransfer`, target AMF sends
+   `CreateUEContext 201` back to source AMF
+7. Source AMF sends `HandoverCommand` to source gNB
+
+The `AMF_SESSION_SYNC_DONE` mechanism coordinates multiple HR sessions —
+`CreateUEContext 201` is only sent after ALL V-SMF PREPARED responses arrive,
+and `HandoverCommand` is only sent after ALL sessions have HandoverCommandTransfer.
+
+**Current limitations:**
+- **V-SMF insertion only**: V-SMF change and V-SMF deletion (§4.23.7.4, §4.23.7.5)
+  are not yet implemented
+- **Nsmf_PDUSession_Context combined with Create**: The V-SMF's Create to H-SMF
+  with `ho_preparation_indication=true` retrieves session context as part of the
+  response, rather than using a separate `Nsmf_PDUSession_Context` service
+- **Indirect forwarding tunnels**: Simplified (may not handle all forwarding cases)
+- **No source I-SMF/I-UPF handling**: Inter-SMF routing via I-SMF is not supported
 
 ## 12. HR Session Rollback on Cancel/Failure
 
 When a handover is cancelled (source gNB sends `HandoverCancel`) or fails
-(target gNB sends `HandoverFailure` → error on `CreateUEContext`), the source
-AMF sends `UpdateSMContext(hoState=CANCELLED)` to the V-SMF for each HR
-session. The `HandoverCancelAcknowledge` or `HandoverPreparationFailure` is
-sent immediately; V-SMF rollback is fire-and-forget (asynchronous). The V-SMF
-clears its prepared handover state and removes any indirect forwarding tunnels.
+(target gNB sends `HandoverFailure` → error on `CreateUEContext`):
+
+**Cancel path:**
+- Source AMF sends `HandoverCancelAcknowledge` immediately to source gNB
+- Source AMF sends `UpdateSMContext(hoState=CANCELLED)` to H-SMF to revert
+  handover state and clear V-SMF reference
+- Target AMF's UE context is cleaned up via visiting gNB release or timeout
+- V-SMF sessions at target AMF are released as part of UE context cleanup
+
+**Failure path:**
+- Target AMF sends `ReleaseSMContext` to V-SMF for each HR session (async)
+- V-SMF releases V-UPF N4 session and notifies H-SMF to remove V-SMF reference
+- Target AMF sends `CreateUEContext` error (403) back to source AMF
+- Source AMF sends `HandoverPreparationFailure` to source gNB
+- UE remains registered on source AMF with existing sessions
 
 ## 13. H-SMF Reachability During Handover
 
