@@ -1058,56 +1058,6 @@ int amf_nsmf_pdusession_handle_update_sm_context(
                 /* Not reached here */
                 ogs_assert_if_reached();
 
-            } else if (state ==
-                    AMF_UPDATE_SM_CONTEXT_INTER_PLMN_HANDOVER_PREPARED) {
-
-                /* Error on UpdateSMContext(PREPARED) for V-SMF insertion.
-                 * Send error for deferred CreateUEContext. */
-                ogs_warn("[%s:%d] UpdateSMContext(PREPARED) to V-SMF failed",
-                        amf_ue->supi, sess->psi);
-                if (AMF_SESSION_SYNC_DONE(amf_ue, state)) {
-                    ogs_sbi_stream_t *stream201 = NULL;
-                    stream201 = ogs_sbi_stream_find_by_id(
-                            amf_ue->create_ue_context_stream_id);
-                    if (stream201) {
-                        ogs_assert(true == ogs_sbi_server_send_error(
-                                stream201,
-                                OGS_SBI_HTTP_STATUS_INTERNAL_SERVER_ERROR,
-                                NULL,
-                                "V-SMF UpdateSMContext(PREPARED) failed",
-                                NULL, NULL));
-                    }
-                    amf_ue->create_ue_context_stream_id =
-                            OGS_INVALID_POOL_ID;
-                }
-
-            } else if (state ==
-                    AMF_UPDATE_SM_CONTEXT_INTER_PLMN_HANDOVER_NOTIFY) {
-
-                /* Error on UpdateSMContext(COMPLETED) for HR session.
-                 * Release the session anyway. */
-                ogs_warn("[%s:%d] UpdateSMContext(COMPLETED) failed, "
-                        "releasing session", amf_ue->supi, sess->psi);
-                if (SESSION_CONTEXT_IN_SMF(sess)) {
-                    amf_nsmf_pdusession_sm_context_param_t rel_param;
-                    memset(&rel_param, 0, sizeof(rel_param));
-                    amf_sbi_send_release_session(
-                            ran_ue, sess,
-                            AMF_RELEASE_SM_CONTEXT_NO_STATE, &rel_param);
-                }
-
-            } else if (state ==
-                AMF_UPDATE_SM_CONTEXT_INTER_PLMN_HANDOVER_COMPLETED_AT_TARGET) {
-
-                /* Error on V-SMF COMPLETED at target AMF.
-                 * Data path may not have switched but the handover
-                 * is already committed - just log the error.
-                 * Do NOT send error indication to gNB. */
-                ogs_warn("[%s:%d] V-SMF COMPLETED failed at T-AMF",
-                        amf_ue->supi, sess->psi);
-
-                return OGS_OK;
-
             } else if (state == AMF_UPDATE_SM_CONTEXT_HANDOVER_CANCEL) {
 
                 if (AMF_SESSION_SYNC_DONE(amf_ue, state)) {
@@ -1378,6 +1328,68 @@ int amf_nsmf_pdusession_handle_update_sm_context(
             ogs_expect(r == OGS_OK);
             ogs_assert(r != OGS_ERROR);
             return OGS_ERROR;
+        }
+
+        /*
+         * Inter-PLMN handover error handlers.
+         * Handle these BEFORE SmContextUpdateError validation because
+         * V-SMF may return a bare error without proper error body.
+         * These states should NOT trigger NGAP error indication to gNB
+         * since the handover may already be committed.
+         */
+        if (state ==
+                AMF_UPDATE_SM_CONTEXT_INTER_PLMN_HANDOVER_PREPARED) {
+
+            /* Error on UpdateSMContext(PREPARED) for V-SMF insertion.
+             * Send error for deferred CreateUEContext. */
+            ogs_warn("[%s:%d] UpdateSMContext(PREPARED) to V-SMF failed "
+                    "(HTTP %d)",
+                    amf_ue->supi, sess->psi, recvmsg->res_status);
+            if (AMF_SESSION_SYNC_DONE(amf_ue, state)) {
+                ogs_sbi_stream_t *stream201 = NULL;
+                stream201 = ogs_sbi_stream_find_by_id(
+                        amf_ue->create_ue_context_stream_id);
+                if (stream201) {
+                    ogs_assert(true == ogs_sbi_server_send_error(
+                            stream201,
+                            OGS_SBI_HTTP_STATUS_INTERNAL_SERVER_ERROR,
+                            NULL,
+                            "V-SMF UpdateSMContext(PREPARED) failed",
+                            NULL, NULL));
+                }
+                amf_ue->create_ue_context_stream_id =
+                        OGS_INVALID_POOL_ID;
+            }
+            return OGS_OK;
+
+        } else if (state ==
+                AMF_UPDATE_SM_CONTEXT_INTER_PLMN_HANDOVER_NOTIFY) {
+
+            /* Error on UpdateSMContext(COMPLETED) for HR session.
+             * Release the session anyway. */
+            ogs_warn("[%s:%d] UpdateSMContext(COMPLETED) failed "
+                    "(HTTP %d), releasing session",
+                    amf_ue->supi, sess->psi, recvmsg->res_status);
+            if (SESSION_CONTEXT_IN_SMF(sess)) {
+                amf_nsmf_pdusession_sm_context_param_t rel_param;
+                memset(&rel_param, 0, sizeof(rel_param));
+                amf_sbi_send_release_session(
+                        ran_ue, sess,
+                        AMF_RELEASE_SM_CONTEXT_NO_STATE, &rel_param);
+            }
+            return OGS_OK;
+
+        } else if (state ==
+                AMF_UPDATE_SM_CONTEXT_INTER_PLMN_HANDOVER_COMPLETED_AT_TARGET) {
+
+            /* Error on V-SMF COMPLETED at target AMF.
+             * Data path may not have switched but the handover
+             * is already committed - just log the error.
+             * Do NOT send error indication to gNB. */
+            ogs_warn("[%s:%d] V-SMF COMPLETED failed at T-AMF "
+                    "(HTTP %d)",
+                    amf_ue->supi, sess->psi, recvmsg->res_status);
+            return OGS_OK;
         }
 
         SmContextUpdateError = recvmsg->SmContextUpdateError;

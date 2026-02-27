@@ -1042,6 +1042,7 @@ bool smf_nsmf_handle_update_sm_context(
     } else if (SmContextUpdateData->ho_state) {
         if (SmContextUpdateData->ho_state == OpenAPI_ho_state_COMPLETED) {
             bool far_update = false;
+            bool had_active_dl = false;
             smf_bearer_t *qos_flow = NULL;
 
             if (sess->handover.prepared == true) {
@@ -1063,7 +1064,18 @@ bool smf_nsmf_handle_update_sm_context(
 
                 if (dl_far->handover.prepared == true) {
 
-                    if (dl_far->apply_action != OGS_PFCP_APPLY_ACTION_FORW) {
+                    /*
+                     * Track whether DL FAR was already forwarding to an
+                     * old gNB. For freshly-inserted V-UPF (HR handover),
+                     * the DL FAR is in BUFF state with no gnode — sending
+                     * end markers would fail with "No GTP Node Setup".
+                     * Only send end markers if there was a prior active
+                     * DL path to switch away from.
+                     */
+                    if (dl_far->apply_action ==
+                            OGS_PFCP_APPLY_ACTION_FORW) {
+                        had_active_dl = true;
+                    } else {
                         far_update = true;
                     }
 
@@ -1081,7 +1093,18 @@ bool smf_nsmf_handle_update_sm_context(
             if (far_update) {
                 uint64_t pfcp_flags =
                     OGS_PFCP_MODIFY_DL_ONLY|OGS_PFCP_MODIFY_ACTIVATE|
-                    OGS_PFCP_MODIFY_N2_HANDOVER|OGS_PFCP_MODIFY_END_MARKER;
+                    OGS_PFCP_MODIFY_N2_HANDOVER;
+
+                /*
+                 * Only send end markers if there was a prior active DL
+                 * path (apply_action was already FORW). For freshly-
+                 * inserted V-UPF during inter-PLMN HR handover, the DL
+                 * FAR starts in BUFF state with no GTP node — sending
+                 * end markers would cause "No GTP Node Setup" error
+                 * at the UPF (TS 29.244 §5.2.4.3).
+                 */
+                if (had_active_dl)
+                    pfcp_flags |= OGS_PFCP_MODIFY_END_MARKER;
 
                 if (HOME_ROUTED_ROAMING_IN_VSMF(sess)) {
                     pfcp_flags |= OGS_PFCP_MODIFY_HOME_ROUTED_ROAMING;
