@@ -111,7 +111,7 @@ static void test1_func(abts_case *tc, void *data)
      * - We create the SUCI structure once (line 99) and it persists in test_ue
      * - After home registration, test_ue will also store the assigned GUTI
      * - When roaming, UE sends GUTI first (3GPP behavior)
-     * - If visiting AMF can't resolve GUTI (no N14), it requests SUCI via Identity procedure
+     * - If visiting AMF can't resolve GUTI, it requests SUCI via Identity procedure
      * 
      * protection_scheme_id = NULL means no encryption (test only - production
      * uses Scheme A/B with actual encryption). This allows us to see the
@@ -539,18 +539,19 @@ static void test1_func(abts_case *tc, void *data)
      * memory and should be included in subsequent registration attempts.
      * 
      * What happens when UE sends home GUTI to visiting network:
-     * 
+     *
      * 1. UE sends Registration Request with 5G-GUTI from home network
      * 2. Visiting AMF receives GUTI but doesn't recognize it (foreign PLMN)
-     * 3. WITH N14 SUPPORT: Visiting AMF would invoke UE Context Transfer
-     *    to old AMF, retrieve SUPI and context, skip authentication
-     * 4. WITHOUT N14 SUPPORT (Open5GS): Visiting AMF cannot resolve GUTI,
-     *    sends Identity Request to obtain SUCI from UE
+     * 3. Visiting AMF cannot resolve the GUTI (no prior context from home AMF
+     *    for this deregistration+re-registration scenario)
+     * 4. Visiting AMF sends Identity Request to obtain SUCI from UE
      * 5. UE responds with Identity Response containing SUCI
      * 6. Now visiting AMF has SUCI and can proceed with authentication
-     * 
+     *
      * This test correctly implements 3GPP-compliant UE behavior (guti=1)
-     * and demonstrates Open5GS behavior without N14 support (Identity exchange).
+     * and exercises the deregistration + re-registration path. For the
+     * N2 inter-PLMN handover path (N14 CreateUEContext/N2InfoNotify),
+     * see n2-handover-lbo-test.c and n2-handover-hr-test.c.
      */
     test_ue->registration_request_param.guti = 1;
     gmmbuf = testgmm_build_registration_request(test_ue, NULL, false, false);
@@ -577,19 +578,15 @@ static void test1_func(abts_case *tc, void *data)
      * The UE sent a Registration Request with 5G-GUTI from home network.
      * The visiting AMF cannot resolve this foreign GUTI because:
      * 
-     * 1. Open5GS does NOT support N14 interface (Namf_Communication_UEContextTransfer)
-     * 2. Without N14, the visiting AMF cannot query the home AMF for UE context
+     * 1. This test exercises deregistration + re-registration, not N2 handover
+     * 2. The visiting AMF cannot resolve the foreign GUTI for a fresh registration
      * 3. Per 3GPP: "If the SUCI is not provided by the UE nor retrieved from
      *    the old AMF, the Identity Request procedure is initiated by AMF"
-     * 
+     *
      * Therefore, the visiting AMF sends Identity Request, and UE responds
-     * with Identity Response containing SUCI. This is Open5GS-specific behavior
-     * due to lack of N14 support.
-     * 
-     * In a full 3GPP implementation WITH N14:
-     * - Visiting AMF would retrieve SUPI from home AMF via UE Context Transfer
-     * - Identity exchange could be skipped
-     * - Authentication might also be skipped (KAMF transferred)
+     * with Identity Response containing SUCI. N14 (CreateUEContext/N2InfoNotify)
+     * is implemented for inter-PLMN N2 handover; see n2-handover-lbo/hr-test.c
+     * for those test cases.
      */
 
     /* Receive Identity request */

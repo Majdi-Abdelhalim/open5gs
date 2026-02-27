@@ -61,9 +61,11 @@
  * Post-handover data path:
  *   UE → T-gNB → N3 → V-UPF (001-01) → N9 → PSA UPF (999-70) → DN
  *
- * RANStatusTransfer (seamless handover):
- *   Source gNB → S-AMF → N2InfoNotify → T-AMF → target gNB
- *   (PDCP SN preservation for lossless handover)
+ * RANStatusTransfer (TS 23.502 §4.23.7.3, between HandoverCommand and HandoverNotify):
+ *   Test step 13: Source gNB → UplinkRANStatusTransfer → S-AMF
+ *   Test step 14: S-AMF → N2InfoNotify(RAN_STATUS_TRANSFER) → T-AMF (server)
+ *   Test step 15: T-AMF → DownlinkRANStatusTransfer → Target gNB
+ *   Enables PDCP SN/HFN preservation for lossless in-sequence delivery.
  *
  * TEST COVERAGE:
  * 1. Basic home-routed inter-PLMN handover (single PDU session, V-SMF insertion)

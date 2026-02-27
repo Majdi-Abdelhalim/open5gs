@@ -111,7 +111,7 @@ static void test1_func(abts_case *tc, void *data)
      * - We create the SUCI structure once (line 109) and it persists in test_ue
      * - After home registration, test_ue will also store the assigned GUTI
      * - When roaming WITHOUT deregistration, UE sends GUTI (3GPP mobility behavior)
-     * - If visiting AMF can't resolve GUTI (no N14), it requests SUCI via Identity procedure
+     * - If visiting AMF can't resolve GUTI, it requests SUCI via Identity procedure
      * 
      * protection_scheme_id = NULL means no encryption (test only - production
      * uses Scheme A/B with actual encryption). This allows us to see the
@@ -458,23 +458,14 @@ static void test1_func(abts_case *tc, void *data)
      * - This indicates: "I was registered elsewhere, now moving to this AMF"
      * - Visiting AMF examines GUTI, recognizes it's from foreign AMF
      * 
-     * WITH N14 Support (Ideal case):
-     * - Visiting AMF invokes Namf_Communication_UEContextTransfer to home AMF
-     * - Home AMF transfers: SUPI, KAMF, subscriber profile, active sessions
-     * - Authentication can be SKIPPED (security context reused)
-     * - PDU sessions can be RELOCATED (seamless handover)
-     * - Registration completes in ~200-300ms
-     * 
-     * WITHOUT N14 Support (Open5GS Current Implementation):
-     * - Visiting AMF cannot retrieve context from home AMF
-     * - Must send Identity Request to obtain SUCI from UE
-     * - Full authentication required via SEPP to home AUSF (~6 seconds)
-     * - New PDU sessions must be established from scratch
-     * - Session continuity is lost
-     * 
-     * This test demonstrates the WITHOUT N14 scenario, which is the current
-     * behavior of Open5GS. When N14 support is added, this test could be
-     * enhanced to verify the faster path with UE context transfer.
+     * N14 (Namf_Communication_CreateUEContext/N2InfoNotify) is implemented
+     * for inter-PLMN N2 handover — see n2-handover-lbo-test.c and
+     * n2-handover-hr-test.c for those test cases.
+     *
+     * This test exercises the mobility re-registration path (no handover):
+     * visiting AMF receives a foreign GUTI it cannot resolve, sends an
+     * Identity Request, and proceeds with full authentication via SEPP.
+     * Session continuity is not preserved (new PDU session established).
      **************************************************************************/
 
     phase2_start = ogs_get_monotonic_time();
@@ -518,29 +509,18 @@ static void test1_func(abts_case *tc, void *data)
      * - Its registration state (considers itself registered)
      * 
      * However, for this specific test we reset the security context to force
-     * fresh authentication. In a real scenario with N14 support, the security
-     * context could potentially be reused. For now, we reset it to match
-     * Open5GS behavior (no N14, full authentication required).
+     * fresh authentication (this test exercises the full re-registration path;
+     * N2 inter-PLMN handover with context preservation is tested in
+     * n2-handover-lbo-test.c and n2-handover-hr-test.c).
      */
     test_ue->nas.registration.tsc = 0;
     test_ue->nas.registration.ksi = OGS_NAS_KSI_NO_KEY_IS_AVAILABLE;
     
-    /*
-     * Registration Type for Mobility:
-     * 
-     * 3GPP TS 24.501 defines registration types:
-     * - INITIAL: First registration or after explicit deregistration
-     * - MOBILITY: Moving to new AMF while still registered
-     * - PERIODIC: Periodic registration update in same area
-     * 
-     * Since we did NOT deregister, this should be MOBILITY_UPDATING.
-     * However, because Open5GS doesn't support N14 (context transfer),
-     * we use INITIAL registration type as the visiting AMF has no prior
-     * knowledge of the UE.
-     * 
-     * With N14 support, this would be set to MOBILITY_UPDATING and the
-     * visiting AMF would retrieve the UE's context from the home AMF.
-     */
+    /* Use INITIAL registration to exercise the full re-registration path.
+     * A real UE retaining its GUTI would send MOBILITY_UPDATING here, but
+     * for this test we focus on the clean registration flow, not handover.
+     * Inter-PLMN N2 handover with context preservation is tested in
+     * n2-handover-lbo-test.c and n2-handover-hr-test.c. */
     test_ue->nas.registration.value = OGS_NAS_5GS_REGISTRATION_TYPE_INITIAL;
 
     /* Reset all registration request parameters */
@@ -572,9 +552,9 @@ static void test1_func(abts_case *tc, void *data)
      * Since test_ue->nas_5gs_guti was populated during Phase 1 home
      * registration, the message builder will use that GUTI.
      * 
-     * What happens next (WITHOUT N14 support):
+     * What happens next (mobility re-registration scenario):
      * 1. Visiting AMF receives foreign GUTI
-     * 2. Cannot resolve it (no N14 to query home AMF)
+     * 2. Cannot resolve it (no UEContextTransfer for this scenario)
      * 3. Sends Identity Request to obtain SUCI
      * 4. Proceeds with full authentication via SEPP
      */
@@ -598,27 +578,20 @@ static void test1_func(abts_case *tc, void *data)
     ogs_info("[TIMING] Roaming registration request sent (with home GUTI)");
 
     /*
-     * Identity Exchange (Open5GS Limitation - No N14):
-     * 
-     * The visiting AMF receives a Registration Request with a 5G-GUTI
-     * from the home network. Without N14 interface support, it cannot
-     * query the home AMF to retrieve the UE's SUPI and context.
-     * 
-     * Therefore, per 3GPP TS 23.502: "If the SUCI is not provided by
-     * the UE nor retrieved from the old AMF, the Identity Request
-     * procedure is initiated by AMF"
-     * 
-     * Expected flow:
-     * 1. Visiting AMF sends Identity Request
-     * 2. UE responds with Identity Response containing SUCI
-     * 3. Visiting AMF now has SUCI and can authenticate via home network
+     * Identity Exchange (foreign GUTI not resolved):
+     *
+     * The visiting AMF receives a Registration Request with a 5G-GUTI from
+     * the home network. Per 3GPP TS 23.502: "If the SUCI is not provided by
+     * the UE nor retrieved from the old AMF, the Identity Request procedure
+     * is initiated by AMF". The visiting AMF sends Identity Request and UE
+     * responds with SUCI, then full authentication proceeds via SEPP.
      */
 
     /* Receive Identity request */
     recvbuf = testgnb_ngap_read(ngap_roaming);
     ABTS_PTR_NOTNULL(tc, recvbuf);
     testngap_recv(test_ue, recvbuf);
-    ogs_info("[TIMING] Identity request received (no N14 support)");
+    ogs_info("[TIMING] Identity request received (foreign GUTI, visiting AMF sends Identity Request)");
 
     /* Send Identity response */
     gmmbuf = testgmm_build_identity_response(test_ue);
