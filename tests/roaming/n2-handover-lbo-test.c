@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2026 <qfyan@uwaterloo.ca>
+ * Copyright (C) 2026 Eric Yan <qfyan@uwaterloo.ca>
  *
  * This file is part of Open5GS.
  *
@@ -1628,26 +1628,21 @@ abts_suite *test_n2_handover_lbo(abts_suite *suite)
     ogs_info("1. Direct Forwarding Cross-PLMN");
     ogs_info("   Target: gNB 0x4001, TAC 22");
     ogs_info("   Tests: Inter-PLMN N2 handover with direct forwarding");
-    ogs_info("   Status: PASS");
     ogs_info(" ");
     ogs_info("2. Indirect Forwarding Cross-PLMN");
     ogs_info("   Target: gNB 0x4002, TAC 23 (different from source)");
     ogs_info("   Tests: Inter-PLMN handover with indirect forwarding");
-    ogs_info("   Status: PASS");
     ogs_info(" ");
     ogs_info("3. Multiple PDU Sessions");
     ogs_info("   Tests: Inter-PLMN handover with active sessions (LBO)");
-    ogs_info("   Status: PASS");
     ogs_info(" ");
     ogs_info("4. Handover Cancel (Inter-AMF)");
     ogs_info("   Tests: Source gNB cancels after HandoverCommand");
     ogs_info("   Validates: inter-AMF branch in ngap_handle_handover_cancel");
-    ogs_info("   Status: PASS");
     ogs_info(" ");
     ogs_info("5. Handover Failure (Inter-AMF)");
     ogs_info("   Tests: Target gNB rejects HandoverRequest");
     ogs_info("   Validates: inter-AMF failure + CreateUEContext error path");
-    ogs_info("   Status: PASS");
     ogs_info(" ");
     ogs_info("========================================");
 

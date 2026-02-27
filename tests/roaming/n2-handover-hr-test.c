@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2026 <qfyan@uwaterloo.ca>
+ * Copyright (C) 2026 Eric Yan <qfyan@uwaterloo.ca>
  *
  * This file is part of Open5GS.
  *
@@ -1627,23 +1627,18 @@ abts_suite *test_n2_handover_hr(abts_suite *suite)
     ogs_info(" ");
     ogs_info("1. Basic HR Inter-PLMN Handover (V-SMF Insertion)");
     ogs_info("   Single PDU session, V-SMF insertion + RANStatusTransfer");
-    ogs_info("   Status: IMPLEMENTED");
     ogs_info(" ");
     ogs_info("2. Indirect Forwarding HR (V-SMF Insertion)");
     ogs_info("   Inter-PLMN indirect (no direct Xn) + RANStatusTransfer");
-    ogs_info("   Status: IMPLEMENTED");
     ogs_info(" ");
     ogs_info("3. Multiple PDU Sessions HR (V-SMF Insertion)");
     ogs_info("   All sessions via V-SMF insertion + RANStatusTransfer");
-    ogs_info("   Status: IMPLEMENTED");
     ogs_info(" ");
     ogs_info("4. Handover Cancel (V-SMF Rollback)");
     ogs_info("   Source cancels, V-SMF+V-UPF released, H-SMF reverts");
-    ogs_info("   Status: IMPLEMENTED");
     ogs_info(" ");
     ogs_info("5. Handover Failure (V-SMF Rollback)");
     ogs_info("   Target rejects, V-SMF+V-UPF released, H-SMF reverts");
-    ogs_info("   Status: IMPLEMENTED");
     ogs_info(" ");
     ogs_info("========================================");
 

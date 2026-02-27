@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2026 <qfyan@uwaterloo.ca>
+ * Copyright (C) 2026 Eric Yan <qfyan@uwaterloo.ca>
  *
  * This file is part of Open5GS.
  *
