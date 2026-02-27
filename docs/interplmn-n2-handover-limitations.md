@@ -164,3 +164,80 @@ throughout the handover. The V-SMF communicates with the H-SMF for N2 SM
 information during handover preparation. If H-SMF connectivity is lost
 mid-handover, the V-SMF's `UpdateSMContext` will fail, causing the handover
 to fail at the source AMF.
+
+## 14. 3GPP Compliance Gaps (Audit)
+
+The following protocol compliance gaps have been identified but do not affect
+functional correctness:
+
+### 14.1 Missing upCnxState in COMPLETED Request
+
+Per TS 29.502 Table 5.2.2.3.1-1 step 3c, the AMF should include
+`upCnxState=ACTIVATING` in the `UpdateSMContext(hoState=COMPLETED)` request,
+and the SMF should respond with `upCnxState=ACTIVATED`. The current
+implementation only sends `hoState=COMPLETED` without `upCnxState`.
+
+**Reason not fixed:** The V-SMF's `UpdateSMContext` handler dispatches on
+`upCnxState` (line 855) BEFORE `hoState` (line 1042) in an `else if` chain.
+Setting both fields causes the V-SMF to enter the regular activation path
+instead of the handover completion path, which crashes because the session
+state doesn't match. Fixing this requires restructuring the V-SMF's
+dispatch logic to handle combined `hoState + upCnxState` requests.
+
+**Impact:** None. The PFCP modification in the COMPLETED handler achieves
+the same data plane effect — DL FAR is switched from BUFF to FORW with the
+target gNB's N3 tunnel info.
+
+### 14.2 HandoverRequiredTransfer Not Forwarded to V-SMF
+
+During V-SMF insertion, the T-AMF sends `CreateSMContext(hoState=PREPARING)`
+to the V-SMF but does not include the gNB's `HandoverRequiredTransfer` as
+`n2SmInfo`. This means the V-SMF cannot process the
+`directForwardingPathAvailability` flag from the source gNB.
+
+**Impact:** Minimal. The V-SMF creates its own `PDUSessionResourceSetupRequestTransfer`
+from V-UPF information. Direct forwarding path availability is only relevant
+for intra-PLMN handover where Xn is available.
+
+### 14.3 Hardcoded QoS Defaults in V-SMF PREPARING
+
+When the V-SMF creates a new session during handover preparation, it uses
+hardcoded QoS defaults (QFI=1, 5QI=9, ARP priority=8) and IPv4-only session
+type. These should ideally be derived from the H-SMF's `PduSessionCreatedData`
+response.
+
+**Impact:** Low for default internet sessions (5QI=9 is the default for
+non-GBR best-effort). May cause QoS mismatch for VoNR (5QI=1) or other
+specialized QoS flows.
+
+## 15. Resolved Bugs (Phase 11)
+
+### 15.1 V-SMF End Marker on Fresh V-UPF (Fixed)
+
+**Bug:** V-SMF's `UpdateSMContext(COMPLETED)` handler unconditionally set
+`OGS_PFCP_MODIFY_END_MARKER` flag. For freshly-inserted V-UPF during HR
+handover, the DL FAR was in BUFF state with no GTP node. The UPF attempted
+to send end markers using a NULL GTP node, causing `[pfcp] ERROR: No GTP
+Node Setup`.
+
+**Fix:** Track `had_active_dl` flag. Only include END_MARKER when the DL FAR
+was already in FORW state (`apply_action == OGS_PFCP_APPLY_ACTION_FORW`),
+indicating a prior active downlink path exists.
+
+**File:** `src/smf/nsmf-handler.c` (COMPLETED handler)
+
+### 15.2 AMF Success Path Duplicate Handlers (Fixed)
+
+**Bug:** In `amf_nsmf_pdusession_handle_update_sm_context()`, the success
+path (HTTP 200/204 without n2SmInfo) had duplicate state handlers for
+`PREPARED`, `NOTIFY`, and `COMPLETED_AT_TARGET` states. Error-style handlers
+appeared BEFORE the correct success handlers in the same `else if` chain,
+shadowing them. When V-SMF returned HTTP 200, the error-style handler ran
+first and logged `WARNING: V-SMF COMPLETED failed at T-AMF`.
+
+**Fix:** Removed the 3 misplaced error handlers from the success path.
+Added them to the actual error path (non-200/204), placed before
+`SmContextUpdateError` validation so they work even with bare error responses.
+Each returns `OGS_OK` to prevent NGAP error indication to gNB.
+
+**File:** `src/amf/nsmf-handler.c` (UpdateSMContext response handler)
