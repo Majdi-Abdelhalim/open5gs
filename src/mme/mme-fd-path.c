@@ -1,4 +1,4 @@
-/*
+/* 3GPP TS 29.272 S6a
  * Copyright (C) 2019-2025 by Sukchan Lee <acetcom@gmail.com>
  *
  * This file is part of Open5GS.
@@ -1261,7 +1261,7 @@ cleanup:
 }
 
 /* MME Sends Update Location Request to HSS */
-void mme_s6a_send_ulr(enb_ue_t *enb_ue, mme_ue_t *mme_ue)
+void mme_s6a_send_ulr(enb_ue_t *enb_ue, mme_ue_t *mme_ue, uint32_t extra_ulr_flags)
 {
     int ret;
 
@@ -1300,6 +1300,11 @@ void mme_s6a_send_ulr(enb_ue_t *enb_ue, mme_ue_t *mme_ue)
             CONSTSTRLEN(OGS_DIAM_S6A_APP_SID_OPT));
     ogs_assert(ret == 0);
     ret = fd_msg_sess_get(fd_g_config->cnf_dict, req, &session, NULL);
+    ogs_assert(ret == 0);
+
+    /* Set Vendor-Specific-Application-Id AVP */
+    ret = ogs_diam_message_vendor_specific_appid_set(
+            req, OGS_DIAM_S6A_APPLICATION_ID);
     ogs_assert(ret == 0);
 
     /* Set the Auth-Session-State AVP */
@@ -1367,8 +1372,9 @@ void mme_s6a_send_ulr(enb_ue_t *enb_ue, mme_ue_t *mme_ue)
     /* Set the ULR-Flags */
     ret = fd_msg_avp_new(ogs_diam_s6a_ulr_flags, 0, &avp);
     ogs_assert(ret == 0);
-    val.u32 = OGS_DIAM_S6A_ULR_S6A_S6D_INDICATOR;
-    val.u32 |= OGS_DIAM_S6A_ULR_INITIAL_ATTACH_IND;
+    val.u32 = OGS_DIAM_S6A_ULR_S6A_S6D_INDICATOR |
+              OGS_DIAM_S6A_ULR_INITIAL_ATTACH_IND |
+              extra_ulr_flags;
     ret = fd_msg_avp_setvalue(avp, &val);
     ogs_assert(ret == 0);
     ret = fd_msg_avp_add(req, MSG_BRW_LAST_CHILD, avp);
@@ -1393,9 +1399,16 @@ void mme_s6a_send_ulr(enb_ue_t *enb_ue, mme_ue_t *mme_ue)
     ret = fd_msg_avp_add(req, MSG_BRW_LAST_CHILD, avp);
     ogs_assert(ret == 0);
 
-    /* Set Vendor-Specific-Application-Id AVP */
-    ret = ogs_diam_message_vendor_specific_appid_set(
-            req, OGS_DIAM_S6A_APPLICATION_ID);
+    /* Set the SMS-Register-Request */
+    ret = fd_msg_avp_new(ogs_diam_s6a_sms_register_request, 0, &avp);
+    ogs_assert(ret == 0);
+    /* "SMS in MME" (3GPP TS 23.272 Annex C) not supported yet.
+     * We do support SGs interface though, so signal that,
+     * see 3GPP TS 23.272 C.8. */
+    val.u32 = OGS_DIAM_S6A_SMS_REGISTER_NOT_PREFERRED;
+    ret = fd_msg_avp_setvalue(avp, &val);
+    ogs_assert(ret == 0);
+    ret = fd_msg_avp_add(req, MSG_BRW_LAST_CHILD, avp);
     ogs_assert(ret == 0);
 
     ret = clock_gettime(CLOCK_REALTIME, &sess_data->ts);
