@@ -335,6 +335,50 @@ static test_sess_t *establish_pdu_session(abts_case *tc, test_ue_t *test_ue,
 }
 
 /*
+ * Helper: Verify GTP-U data path works on the target network after handover.
+ * Sends 2 IPv4 ICMP pings and verifies the responses are received.
+ * Call this after handover completes to confirm the data plane is operational.
+ *
+ * @param gtpu:  GTP-U socket connected to the visiting/target UPF
+ * @param sess:  Active session with valid QoS flow tunnel information
+ * @param label: Test label for log messages (e.g. "TEST1", "HR-TEST2")
+ */
+static void verify_gtpu_post_handover(abts_case *tc,
+        ogs_socknode_t *gtpu, test_sess_t *sess, const char *label)
+{
+    int rv;
+    ogs_pkbuf_t *recvbuf;
+    test_bearer_t *qos_flow;
+
+    qos_flow = test_qos_flow_find_by_qfi(sess, 1);
+    ogs_assert(qos_flow);
+
+    ogs_info("[%s] Verifying GTP-U data path post-handover in visiting network",
+            label);
+
+    /* Send first GTP-U ICMP ping */
+    rv = test_gtpu_send_ping(gtpu, qos_flow, TEST_PING_IPV4);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    /* Receive GTP-U ICMP reply */
+    recvbuf = testgnb_gtpu_read(gtpu);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    ogs_pkbuf_free(recvbuf);
+
+    /* Send second GTP-U ICMP ping */
+    rv = test_gtpu_send_ping(gtpu, qos_flow, TEST_PING_IPV4);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    /* Receive GTP-U ICMP reply */
+    recvbuf = testgnb_gtpu_read(gtpu);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    ogs_pkbuf_free(recvbuf);
+
+    ogs_info("[%s] GTP-U data path verified - visiting network is operational",
+            label);
+}
+
+/*
  * TEST 1: Basic Home-Routed Inter-PLMN N2 Handover (Single PDU Session)
  *
  * Setup:
@@ -613,6 +657,27 @@ static void test1_func(abts_case *tc, void *data)
 
     TIMING_PHASE_END("HR-TEST1", "Phase 2 (handover)", t_phase);
 
+    /**************************************************************************
+     * PHASE 3: VERIFY DATA PATH IN VISITING NETWORK (HR)
+     * HR: PDU sessions are preserved via V-SMF insertion.
+     * The V-UPF routes packets: target gNB → N3 → V-UPF → N9 → PSA UPF → DN.
+     **************************************************************************/
+
+    TIMING_PHASE_START(t_phase);
+    ogs_info("[HR-TEST1] ========================================");
+    ogs_info("[HR-TEST1] Phase 3: Verify data path in visiting network");
+    ogs_info("[HR-TEST1] ========================================");
+
+    /* Switch to visiting AMF context for GTP-U verification */
+    test_ue->amf_ue_ngap_id = visiting_amf_ue_ngap_id;
+    test_ue->ran_ue_ngap_id = visiting_ran_ue_ngap_id;
+
+    /* HR: verify preserved session via V-UPF → H-SMF → PSA UPF */
+    verify_gtpu_post_handover(tc, gtpu_visiting, sess, "HR-TEST1");
+
+    ogs_info("[HR-TEST1] Phase 3 complete - data path verified in visiting network");
+    TIMING_PHASE_END("HR-TEST1", "Phase 3 (data path verification)", t_phase);
+
     /********** Cleanup visiting AMF UE context */
     test_ue->amf_ue_ngap_id = visiting_amf_ue_ngap_id;
     test_ue->ran_ue_ngap_id = visiting_ran_ue_ngap_id;
@@ -824,6 +889,27 @@ static void test2_func(abts_case *tc, void *data)
     ogs_info("[HR-TEST2] HR indirect forwarding handover completed");
 
     TIMING_PHASE_END("HR-TEST2", "Handover", t_phase);
+
+    /**************************************************************************
+     * PHASE 3: VERIFY DATA PATH IN VISITING NETWORK (HR)
+     **************************************************************************/
+
+    TIMING_PHASE_START(t_phase);
+    ogs_info("[HR-TEST2] Phase 3: Verify data path in visiting network");
+
+    /* Switch to visiting AMF context */
+    test_ue->amf_ue_ngap_id = visiting_amf_ue_ngap_id;
+    test_ue->ran_ue_ngap_id = visiting_ran_ue_ngap_id;
+
+    /* HR: verify preserved session (PSI 5) via V-UPF */
+    {
+        test_sess_t *internet_sess = test_sess_find_by_psi(test_ue, 5);
+        ogs_assert(internet_sess);
+        verify_gtpu_post_handover(tc, gtpu_visiting, internet_sess, "HR-TEST2");
+    }
+
+    ogs_info("[HR-TEST2] Phase 3 complete - data path verified in visiting network");
+    TIMING_PHASE_END("HR-TEST2", "Phase 3 (data path verification)", t_phase);
 
     /* Cleanup visiting AMF UE context */
     test_ue->amf_ue_ngap_id = visiting_amf_ue_ngap_id;
@@ -1078,6 +1164,27 @@ static void test3_func(abts_case *tc, void *data)
     ogs_info("[HR-TEST3] HR multi-session handover completed");
 
     TIMING_PHASE_END("HR-TEST3", "Handover", t_phase);
+
+    /**************************************************************************
+     * PHASE 3: VERIFY DATA PATH IN VISITING NETWORK (HR)
+     **************************************************************************/
+
+    TIMING_PHASE_START(t_phase);
+    ogs_info("[HR-TEST3] Phase 3: Verify data path in visiting network");
+
+    /* Switch to visiting AMF context */
+    test_ue->amf_ue_ngap_id = visiting_amf_ue_ngap_id;
+    test_ue->ran_ue_ngap_id = visiting_ran_ue_ngap_id;
+
+    /* HR: verify internet session (PSI 5) via V-UPF */
+    {
+        test_sess_t *internet_sess = test_sess_find_by_psi(test_ue, 5);
+        ogs_assert(internet_sess);
+        verify_gtpu_post_handover(tc, gtpu_visiting, internet_sess, "HR-TEST3");
+    }
+
+    ogs_info("[HR-TEST3] Phase 3 complete - data path verified in visiting network");
+    TIMING_PHASE_END("HR-TEST3", "Phase 3 (data path verification)", t_phase);
 
     /* Cleanup visiting AMF UE context */
     test_ue->amf_ue_ngap_id = visiting_amf_ue_ngap_id;
