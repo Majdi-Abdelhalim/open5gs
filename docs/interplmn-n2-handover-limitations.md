@@ -199,20 +199,25 @@ to the V-SMF but does not include the gNB's `HandoverRequiredTransfer` as
 from V-UPF information. Direct forwarding path availability is only relevant
 for intra-PLMN handover where Xn is available.
 
-### 14.3 Hardcoded QoS Defaults in V-SMF PREPARING
+### 14.3 ~~Hardcoded QoS Defaults in V-SMF PREPARING~~ (RESOLVED — Phase 8)
 
-When the V-SMF creates a new session during handover preparation, it uses
+~~When the V-SMF creates a new session during handover preparation, it uses
 hardcoded QoS defaults (QFI=1, 5QI=9, ARP priority=8) and IPv4-only session
 type. These should ideally be derived from the H-SMF's `PduSessionCreatedData`
-response.
+response.~~
 
-**Impact:** Low for default internet sessions (5QI=9 is the default for
-non-GBR best-effort). May cause QoS mismatch for VoNR (5QI=1) or other
-specialized QoS flows.
+**Resolved:** The V-SMF now updates `qos_flow->qfi`, `qos_flow->qos.index`,
+and `qos_flow->qos.arp.*` from the H-SMF's `qos_flows_setup_list` in the
+`PduSessionCreatedData` response. The session type (`sess->session.session_type`)
+was already being updated from H-SMF. The initial hardcoded defaults remain
+as a bootstrap during V-UPF N4 establishment (before H-SMF responds), but are
+immediately overwritten with actual values once the H-SMF 201 response arrives.
 
-## 15. Resolved Bugs (Phase 11)
+**File:** `src/smf/nsmf-handler.c` (H-SMF 201 handler, after `h_smf_qos_flows_setup_list` storage)
 
-### 15.1 V-SMF End Marker on Fresh V-UPF (Fixed)
+## 15. Resolved Bugs
+
+### 15.1 V-SMF End Marker on Fresh V-UPF (Fixed — Phase 11)
 
 **Bug:** V-SMF's `UpdateSMContext(COMPLETED)` handler unconditionally set
 `OGS_PFCP_MODIFY_END_MARKER` flag. For freshly-inserted V-UPF during HR
@@ -226,7 +231,7 @@ indicating a prior active downlink path exists.
 
 **File:** `src/smf/nsmf-handler.c` (COMPLETED handler)
 
-### 15.2 AMF Success Path Duplicate Handlers (Fixed)
+### 15.2 AMF Success Path Duplicate Handlers (Fixed — Phase 11)
 
 **Bug:** In `amf_nsmf_pdusession_handle_update_sm_context()`, the success
 path (HTTP 200/204 without n2SmInfo) had duplicate state handlers for
@@ -241,3 +246,53 @@ Added them to the actual error path (non-200/204), placed before
 Each returns `OGS_OK` to prevent NGAP error indication to gNB.
 
 **File:** `src/amf/nsmf-handler.c` (UpdateSMContext response handler)
+
+### 15.3 Test-Side UL_NGU_UP_TNLInformation Not Extracted (Fixed — Phase 0)
+
+**Bug:** `testngap_handle_handover_request()` did not extract
+`UL_NGU_UP_TNLInformation` from the `PDUSessionResourceSetupRequestTransfer`
+in HandoverRequest. This caused `sess->upf_n3_ip/teid` to remain pointing at
+the old H-UPF instead of the V-UPF, making post-handover GTP-U verification
+send traffic to the wrong UPF.
+
+**Fix:** Added `case NGAP_ProtocolIE_ID_id_UL_NGU_UP_TNLInformation` to extract
+V-UPF N3 tunnel info (IP address and TEID).
+
+**File:** `tests/common/ngap-handler.c` (`testngap_handle_handover_request()`)
+
+### 15.4 Test-Side gnb_n3_addr Not Swapped Before HandoverRequestAck (Fixed — Phase 0)
+
+**Bug:** In `n2-handover-hr-test.c`, the target gNB's N3 address was not
+swapped before sending HandoverRequestAck, causing the V-SMF's DL FAR to
+point at the wrong gNB.
+
+**Fix:** Added `gnb_n3_addr` swap to visiting PLMN address before
+`HandoverRequestAck` is sent.
+
+**File:** `tests/roaming/n2-handover-hr-test.c`
+
+### 15.5 H-SMF Premature sess->remote_dl_ip Overwrite (Fixed — Phase 0)
+
+**Bug:** During HR handover preparation, the H-SMF's HO handler
+(`ho_preparation_indication`) immediately overwrote `sess->remote_dl_ip` with
+the V-SMF's tunnel info. Since the PSA-UPF PFCP modification hadn't happened
+yet, the DL FAR was never updated, causing post-handover DL GTP-U to be sent
+to the old destination.
+
+**Fix:** Stage the V-SMF tunnel info in `sess->handover.remote_dl_ip` and
+`sess->handover.remote_dl_teid`. Copy to `sess->remote_dl_ip` only in the
+ACTIVATED_FROM_N2_HANDOVER handler after PFCP modification completes.
+
+**File:** `src/smf/nsmf-handler.c`, `src/smf/gsm-sm.c`
+
+### 15.6 V-SMF COMPLETED Missing UL_ONLY PFCP Flag (Fixed — Phase 0)
+
+**Bug:** The V-SMF's `UpdateSMContext(COMPLETED)` handler did not set the
+`UL_ONLY` PFCP flag for HOME_ROUTED_ROAMING sessions. This meant the V-UPF's
+UL FAR (source ACCESS / destination CORE) was never pushed, preventing UL
+GTP-U traffic from being forwarded by V-UPF.
+
+**Fix:** Added `OGS_PFCP_MODIFY_UL_ONLY` flag alongside the existing `DL_ONLY`
+flag in the COMPLETED handler for HOME_ROUTED_ROAMING sessions.
+
+**File:** `src/smf/nsmf-handler.c` (COMPLETED handler)

@@ -2236,6 +2236,56 @@ bool smf_nsmf_handle_created_data_in_vsmf(
         else
             OpenAPI_list_free(qosFlowsSetupList);
 
+        /*
+         * Update the V-UPF QoS flow with actual QoS from H-SMF.
+         *
+         * During HO PREPARING, the qos_flow was initialized with hardcoded
+         * defaults (QFI=1, 5QI=9, ARP=8).  Now that H-SMF has responded
+         * with the real QoS profile, update the qos_flow so the V-UPF
+         * PDR/QER reflect the correct values.
+         */
+        if (sess->ho_state_preparing && sess->h_smf_qos_flows_setup_list) {
+            OpenAPI_lnode_t *qos_node = NULL;
+            qos_node = sess->h_smf_qos_flows_setup_list->first;
+            if (qos_node) {
+                OpenAPI_qos_flow_setup_item_t *qos_item = qos_node->data;
+                if (qos_item && qos_item->qos_flow_profile) {
+                    OpenAPI_qos_flow_profile_t *qfp =
+                            qos_item->qos_flow_profile;
+
+                    qos_flow->qfi = qos_item->qfi;
+                    qos_flow->qos.index = qfp->_5qi;
+
+                    if (qfp->arp) {
+                        qos_flow->qos.arp.priority_level =
+                                qfp->arp->priority_level;
+
+                        if (qfp->arp->preempt_cap ==
+                                OpenAPI_preemption_capability_NOT_PREEMPT)
+                            qos_flow->qos.arp.pre_emption_capability =
+                                    OGS_5GC_PRE_EMPTION_DISABLED;
+                        else
+                            qos_flow->qos.arp.pre_emption_capability =
+                                    OGS_5GC_PRE_EMPTION_ENABLED;
+
+                        if (qfp->arp->preempt_vuln ==
+                                OpenAPI_preemption_vulnerability_NOT_PREEMPTABLE)
+                            qos_flow->qos.arp.pre_emption_vulnerability =
+                                    OGS_5GC_PRE_EMPTION_DISABLED;
+                        else
+                            qos_flow->qos.arp.pre_emption_vulnerability =
+                                    OGS_5GC_PRE_EMPTION_ENABLED;
+                    }
+
+                    ogs_info("[%s:%d] V-SMF QoS updated from H-SMF: "
+                            "QFI=%d 5QI=%d ARP=%d",
+                            smf_ue->supi, sess->psi,
+                            qos_flow->qfi, qos_flow->qos.index,
+                            qos_flow->qos.arp.priority_level);
+                }
+            }
+        }
+
         sessionAmbr = PduSessionCreatedData->session_ambr;
         if (sessionAmbr) {
             if (sessionAmbr->uplink)
