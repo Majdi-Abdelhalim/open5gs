@@ -65,6 +65,8 @@ tshark, add: `-d tcp.port==80,http2 -d tcp.port==7777,http2`
 | 11   | HandoverNotify                      |
 | 41   | UEContextReleaseCommand / Complete  |
 | 42   | UEContextReleaseRequest             |
+| 47   | UplinkRANStatusTransfer             |
+| 48   | DownlinkRANStatusTransfer           |
 
 ## Capturing
 
@@ -82,16 +84,17 @@ sudo ./build/tests/roaming/roaming \
 
 ## Master Filter: Full Handover Message Sequence
 
-This single filter shows all handover-relevant messages (NGAP + key SBI) in
-chronological order, excluding NRF discovery, UDR, UDM, PCF, BSF, and AUSF
-background traffic:
+This single filter shows all handover-relevant messages (NGAP + key SBI +
+PFCP + GTP-U) in chronological order, excluding NRF discovery, UDR, UDM, PCF,
+BSF, and AUSF background traffic:
 
 ```bash
 tshark -r handover_test.pcap \
     -d tcp.port==80,http2 -d tcp.port==7777,http2 \
-    -Y 'ngap || (http2.headers.path and (http2.headers.path contains "namf-comm" or http2.headers.path contains "nsmf-pdusession"))' \
+    -Y 'ngap || pfcp || gtp || (http2.headers.path and (http2.headers.path contains "namf-comm" or http2.headers.path contains "nsmf-pdusession"))' \
     -T fields -e frame.number -e ip.src -e ip.dst -e tcp.dstport \
-    -e ngap.procedureCode -e http2.headers.method -e http2.headers.path
+    -e ngap.procedureCode -e pfcp.msg_type -e gtp.message_type \
+    -e http2.headers.method -e http2.headers.path
 ```
 
 ## Additional Useful Filters
@@ -113,6 +116,27 @@ tshark -r handover_test.pcap \
     -d tcp.port==80,http2 -d tcp.port==7777,http2 \
     -Y 'http2.headers.path contains "n2-info-notify"' \
     -T fields -e frame.number -e ip.src -e ip.dst -e tcp.dstport
+
+# V-SMF → H-SMF SBI traffic through SEPP (HR only)
+tshark -r handover_test.pcap \
+    -d tcp.port==80,http2 -d tcp.port==7777,http2 \
+    -Y 'http2.headers.path contains "pdu-sessions" and (http2.headers.method == "POST" or http2.headers.method == "PATCH")' \
+    -T fields -e frame.number -e ip.src -e ip.dst -e tcp.dstport -e http2.headers.method -e http2.headers.path
+
+# PFCP traffic (V-UPF and PSA-UPF N4 sessions)
+tshark -r handover_test.pcap \
+    -Y 'pfcp' \
+    -T fields -e frame.number -e ip.src -e ip.dst -e pfcp.msg_type
+
+# GTP-U traffic (post-handover data verification)
+tshark -r handover_test.pcap \
+    -Y 'gtp' \
+    -T fields -e frame.number -e ip.src -e ip.dst -e gtp.message_type -e gtp.teid
+
+# Post-handover GTP-U only (filter by V-UPF address)
+tshark -r handover_test.pcap \
+    -Y 'gtp and (ip.addr == 127.0.2.7)' \
+    -T fields -e frame.number -e ip.src -e ip.dst -e gtp.message_type -e gtp.teid
 ```
 
 ---
@@ -348,12 +372,20 @@ For a successful inter-PLMN N2 handover, verify ALL of the following:
       after HandoverRequired
 - [ ] **PDU session release after handover**: `sm-contexts/{id}/release` appears
       after N2InfoNotify
+- [ ] **No V-SMF insertion**: No CreateSMContext to V-SMF (`127.0.2.4`) or
+      PFCP traffic to V-UPF (`127.0.2.7`) during handover preparation
+- [ ] **New PDU session at V-AMF**: POST `/nsmf-pdusession/v1/sm-contexts` to
+      visiting SMF after handover completes (new session, not transferred)
+- [ ] **Post-HO GTP-U via V-UPF**: GTP-U T-PDU goes through V-UPF
+      (`127.0.2.7`) in new session (no N9 tunnel to H-UPF)
 
 ### HR-Specific (V-SMF Insertion)
 - [ ] **V-SMF CreateSMContext**: POST `/nsmf-pdusession/v1/sm-contexts` to
       V-SMF (`127.0.2.4`) with `hoState: PREPARING` after CreateUEContext arrives
 - [ ] **V-SMF → H-SMF Create through SEPP**: POST `/nsmf-pdusession/v1/pdu-sessions`
       with `ho_preparation_indication` routed through SCP→SEPP to H-SMF (`127.0.1.4`)
+- [ ] **V-UPF N4 Session Establishment**: PFCP Session Establishment on V-UPF
+      (`127.0.2.7`) before HandoverRequest
 - [ ] **PDU sessions in HandoverRequest**: PDUSessionResourceSetupListHOReq
       contains V-UPF N3 info from V-SMF CreateSMContext response
 - [ ] **V-SMF UpdateSMContext PREPARED**: `sm-contexts/{id}/modify` with
@@ -365,7 +397,13 @@ For a successful inter-PLMN N2 handover, verify ALL of the following:
 - [ ] **V-SMF UpdateSMContext COMPLETED**: `sm-contexts/{id}/modify` with
       `hoState: COMPLETED` to V-SMF after HandoverNotify
 - [ ] **V-UPF N4 path switch**: PFCP Session Modification on V-UPF (`127.0.2.7`)
-      for DL data path switch after COMPLETED
+      for DL data path switch and UL FAR after COMPLETED
+- [ ] **V-SMF → H-SMF HsmfUpdateData**: PATCH `/nsmf-pdusession/v1/pdu-sessions/{id}`
+      through SEPP to H-SMF (`127.0.1.4`) with DL CN tunnel info (V-UPF N3 addr)
+- [ ] **PSA-UPF N4 path switch**: PFCP Session Modification on PSA-UPF
+      (`127.0.1.7`) to update DL FAR to V-UPF N3 address
+- [ ] **Post-HO GTP-U via V-UPF**: GTP-U T-PDU goes gNB → V-UPF → PSA-UPF
+      (not directly gNB → H-UPF)
 
 ---
 
@@ -455,16 +493,48 @@ switch the data path. Target AMF also sends N2InfoNotify to source AMF:
 |---|-------------|-------------|------|----------|-------------------------------|
 | 1 | 127.0.0.3   | 127.0.2.5   | SCTP | NGAP 11  | **HandoverNotify** (target gNB → T-AMF) |
 | 2 | 127.0.0.1   | 127.0.2.200 | 7777 | SBI      | POST .../sm-contexts/{id}/modify hoState=COMPLETED (T-AMF→SCP→V-SMF) |
-|   |             |             |      |          | *V-SMF modifies V-UPF N4 (DL path switch, end marker)* |
-| 3 | 127.0.0.1   | 127.0.2.200 | 7777 | SBI      | POST .../n2-info-notify (HANDOVER_COMPLETED, T-AMF→SCP→SEPP→Home AMF) |
+|   |             |             |      |          | *V-SMF modifies V-UPF N4 (UL FAR + DL path switch):* |
+| 3 | 127.0.0.1   | 127.0.2.7   | 8805 | PFCP     | PFCP Session Modification Request (V-SMF→V-UPF) |
+| 4 | 127.0.2.7   | 127.0.0.1   | 8805 | PFCP     | PFCP Session Modification Response (V-UPF→V-SMF) |
+|   |             |             |      |          | *V-SMF sends HsmfUpdateData to H-SMF via SEPP (DL CN tunnel update):* |
+| 5 | 127.0.0.1   | 127.0.2.200 | 7777 | SBI      | PATCH /nsmf-pdusession/v1/pdu-sessions/{id} (V-SMF→SCP, HsmfUpdateData) |
+|   |             |             |      |          | *(5-hop SEPP chain: V-SMF→SCP2→SEPP2→SEPP1→SCP1→H-SMF)* |
+| 6 | 127.0.0.1   | 127.0.1.4   |  80  | SBI      | PATCH /nsmf-pdusession/v1/pdu-sessions/{id} (SCP→H-SMF) |
+|   |             |             |      |          | *H-SMF modifies PSA-UPF N4 (DL FAR → V-UPF N3 addr):* |
+| 7 | 127.0.0.1   | 127.0.1.7   | 8805 | PFCP     | PFCP Session Modification Request (H-SMF→PSA-UPF) |
+| 8 | 127.0.1.7   | 127.0.0.1   | 8805 | PFCP     | PFCP Session Modification Response (PSA-UPF→H-SMF) |
+|   |             |             |      |          | *H-SMF returns 204 → V-SMF returns 200 to T-AMF* |
+| 9 | 127.0.0.1   | 127.0.2.200 | 7777 | SBI      | POST .../n2-info-notify (HANDOVER_COMPLETED, T-AMF→SCP→SEPP→Home AMF) |
 |   |             |             |      |          | *(5-hop SEPP chain to Home AMF)* |
-| 4 | 127.0.1.5   | 127.0.0.2   | SCTP | NGAP 41  | UEContextReleaseCommand (Home AMF → src gNB) |
+|10 | 127.0.1.5   | 127.0.0.2   | SCTP | NGAP 41  | UEContextReleaseCommand (Home AMF → src gNB) |
 
 **What to verify (HR COMPLETED)**:
 - `sm-contexts/{id}/modify` with `hoState: COMPLETED` to V-SMF at `127.0.2.4`
-- PFCP Session Modification on V-UPF (`127.0.2.7`) for DL path switch
+- PFCP Session Modification on V-UPF (`127.0.2.7`) — UL FAR pushed, DL path switched
+- HsmfUpdateData (PATCH) to H-SMF (`127.0.1.4`) through SEPP — DL CN tunnel update
+- PFCP Session Modification on PSA-UPF (`127.0.1.7`) — DL FAR updated to V-UPF N3
 - N2InfoNotify (HANDOVER_COMPLETED) through SEPP to Home AMF
 - Source gNB released after notification
+
+### HR Post-Handover GTP-U Data Path Verification
+
+After handover completes, GTP-U data follows the path:
+UE → target gNB → **V-UPF** (`127.0.2.7`) → **PSA-UPF** (`127.0.1.7`) → DN
+(and reverse for DL). This confirms the V-SMF insertion and N4 path switch
+worked correctly.
+
+| # | Src         | Dst         | Port | Protocol | Message                       |
+|---|-------------|-------------|------|----------|-------------------------------|
+| 1 | 127.0.0.3   | 127.0.2.7   | GTP-U| GTP-U    | T-PDU UL (target gNB → V-UPF, TEID=V-UPF N3) |
+| 2 | 127.0.2.7   | 127.0.1.7   | GTP-U| GTP-U    | T-PDU UL (V-UPF → PSA-UPF, TEID=H-UPF N9) |
+| 3 | 127.0.1.7   | 127.0.2.7   | GTP-U| GTP-U    | T-PDU DL (PSA-UPF → V-UPF, TEID=V-UPF N9) |
+| 4 | 127.0.2.7   | 127.0.0.3   | GTP-U| GTP-U    | T-PDU DL (V-UPF → target gNB, TEID=gNB N3) |
+
+**What to verify (Post-HO GTP-U)**:
+- UL GTP-U goes to V-UPF (`127.0.2.7`), NOT to H-UPF (`127.0.1.7`) directly
+- V-UPF forwards to PSA-UPF via N9 tunnel
+- DL GTP-U returns from PSA-UPF → V-UPF → target gNB
+- No GTP-U to/from source gNB (`127.0.0.2`) after handover
 
 ### HR Cancel: V-SMF Rollback
 
@@ -496,6 +566,79 @@ Source AMF sends `HandoverPreparationFailure`:
 |   |             |             |      |          | *V-SMF releases V-UPF N4, notifies H-SMF to remove V-SMF reference* |
 |   |             |             |      |          | *CreateUEContext 403 response back through SEPP* |
 | 3 | 127.0.1.5   | 127.0.0.2   | SCTP | NGAP 12  | HandoverPreparationFailure |
+
+---
+
+## Local-Breakout (LBO) Handover — Detailed Message Flow
+
+In LBO mode, PDU sessions are anchored at the visiting PLMN's UPF. During
+inter-PLMN N2 handover, the source AMF **does not** transfer PDU sessions
+to the target AMF because the sessions are LBO (not home-routed). After
+handover, the old sessions are released and new PDU sessions are established
+at the visiting AMF.
+
+### LBO Preparation Phase
+
+| # | Src         | Dst         | Port | Protocol | Message                       |
+|---|-------------|-------------|------|----------|-------------------------------|
+| 1 | 127.0.0.2   | 127.0.1.5   | SCTP | NGAP 12  | HandoverRequired (src gNB → Home AMF) |
+| 2 | 127.0.0.1   | 127.0.1.200 | 7777 | SBI      | POST /nsmf-pdusession/v1/sm-contexts/{id}/modify (S-AMF→SCP→SMF) |
+|   |             |             |      |          | *No V-SMF insertion — LBO sessions excluded from CreateUEContext* |
+| 3 | 127.0.0.1   | 127.0.1.200 | 7777 | SBI      | POST /namf-comm/v1/ue-contexts/{imsi} (CreateUEContext, 5 SEPP hops) |
+|   |             |             |      |          | *PDU session list empty — no sessions to transfer* |
+| 4 | 127.0.2.5   | 127.0.0.3   | SCTP | NGAP 13  | HandoverRequest (T-AMF → tgt gNB, no PDU sessions) |
+| 5 | 127.0.0.3   | 127.0.2.5   | SCTP | NGAP 13  | HandoverRequestAck (tgt gNB → T-AMF) |
+|   |             |             |      |          | *CreateUEContext 201 response back through SEPP (5 hops)* |
+| 6 | 127.0.1.5   | 127.0.0.2   | SCTP | NGAP 12  | HandoverCommand (Home AMF → src gNB) |
+
+**What to verify (LBO Preparation)**:
+- CreateUEContext has empty PDUSessionResourceSetupListHOReq
+- No V-SMF CreateSMContext or PFCP traffic to `127.0.2.4` or `127.0.2.7`
+- HandoverRequest (NGAP 13) has no PDU session resources
+
+### LBO Execution Phase
+
+| # | Src         | Dst         | Port | Protocol | Message                       |
+|---|-------------|-------------|------|----------|-------------------------------|
+| 1 | 127.0.0.3   | 127.0.2.5   | SCTP | NGAP 11  | HandoverNotify (tgt gNB → T-AMF) |
+| 2 | 127.0.0.1   | 127.0.2.200 | 7777 | SBI      | POST .../n2-info-notify (HANDOVER_COMPLETED, T-AMF→SCP→SEPP→Home AMF) |
+|   |             |             |      |          | *(5-hop SEPP chain to Home AMF)* |
+| 3 | 127.0.0.1   | 127.0.1.200 | 7777 | SBI      | POST .../sm-contexts/{id}/release (S-AMF→SCP→SMF, release old sessions) |
+| 4 | 127.0.1.5   | 127.0.0.2   | SCTP | NGAP 41  | UEContextReleaseCommand (Home AMF → src gNB) |
+
+**What to verify (LBO Execution)**:
+- N2InfoNotify goes through SEPP (5 hops) to Home AMF
+- Old PDU sessions released at S-AMF **after** receiving N2InfoNotify
+- Source gNB context released
+
+### LBO Post-Handover: New PDU Session Establishment
+
+After handover, the UE establishes **new** PDU sessions at the visiting AMF.
+These are standard PDU session establishment procedures — no V-SMF insertion
+since LBO sessions are anchored at the visiting PLMN.
+
+| # | Src         | Dst         | Port | Protocol | Message                       |
+|---|-------------|-------------|------|----------|-------------------------------|
+| 1 | 127.0.0.3   | 127.0.2.5   | SCTP | NGAP 46  | UL NAS: PDU Session Est Req (tgt gNB → V-AMF) |
+| 2 | 127.0.0.1   | 127.0.2.200 | 7777 | SBI      | POST /nsmf-pdusession/v1/sm-contexts (V-AMF→SCP→SMF) |
+|   |             |             |      |          | *SMF creates session, establishes V-UPF N4, calls N1N2MessageTransfer* |
+| 3 | 127.0.2.5   | 127.0.0.3   | SCTP | NGAP 29  | PDUSessionResourceSetupRequest (V-AMF → tgt gNB) |
+| 4 | 127.0.0.3   | 127.0.2.5   | SCTP | NGAP 29  | PDUSessionResourceSetupResponse (tgt gNB → V-AMF) |
+
+### LBO Post-Handover GTP-U Data Path Verification
+
+After new PDU session establishment, GTP-U data flows directly through the
+visiting PLMN's UPF:
+
+| # | Src         | Dst         | Port | Protocol | Message                       |
+|---|-------------|-------------|------|----------|-------------------------------|
+| 1 | 127.0.0.3   | 127.0.2.7   | GTP-U| GTP-U    | T-PDU UL (target gNB → V-UPF) |
+| 2 | 127.0.2.7   | 127.0.0.3   | GTP-U| GTP-U    | T-PDU DL (V-UPF → target gNB) |
+
+**What to verify (LBO Post-HO GTP-U)**:
+- GTP-U goes to V-UPF (`127.0.2.7`), **not** to H-UPF (`127.0.1.7`)
+- No N9 tunnel (V-UPF is the anchor, not a relay)
+- No GTP-U to/from source gNB (`127.0.0.2`) after handover
 
 ---
 
