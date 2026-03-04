@@ -1,0 +1,41 @@
+127.0.0.1 localhost
+127.0.1.1 atlas-gpu02
+
+# Custom for open5gs
+127.0.1.10      nrf.5gc.mnc070.mcc999.3gppnetwork.org
+127.0.1.11      ausf.5gc.mnc070.mcc999.3gppnetwork.org
+127.0.1.12      udm.5gc.mnc070.mcc999.3gppnetwork.org
+127.0.1.14      nssf.5gc.mnc070.mcc999.3gppnetwork.org
+127.0.1.4       smf.5gc.mnc070.mcc999.3gppnetwork.org
+127.0.1.15      bsf.5gc.mnc070.mcc999.3gppnetwork.org
+127.0.1.5       amf.5gc.mnc070.mcc999.3gppnetwork.org
+127.0.1.13      pcf.5gc.mnc070.mcc999.3gppnetwork.org
+127.0.1.20      udr.5gc.mnc070.mcc999.3gppnetwork.org
+
+127.0.2.10      nrf.5gc.mnc001.mcc001.3gppnetwork.org
+127.0.2.11      ausf.5gc.mnc001.mcc001.3gppnetwork.org
+127.0.2.12      udm.5gc.mnc001.mcc001.3gppnetwork.org
+127.0.2.14      nssf.5gc.mnc001.mcc001.3gppnetwork.org
+127.0.2.4       smf.5gc.mnc001.mcc001.3gppnetwork.org
+127.0.2.15      bsf.5gc.mnc001.mcc001.3gppnetwork.org
+127.0.2.5       amf.5gc.mnc001.mcc001.3gppnetwork.org
+127.0.2.13      pcf.5gc.mnc001.mcc001.3gppnetwork.org
+127.0.2.20      udr.5gc.mnc001.mcc001.3gppnetwork.org
+
+127.0.3.10      nrf.5gc.mnc010.mcc315.3gppnetwork.org
+127.0.3.11      ausf.5gc.mnc010.mcc315.3gppnetwork.org
+127.0.3.12      udm.5gc.mnc010.mcc315.3gppnetwork.org
+127.0.3.14      nssf.5gc.mnc010.mcc315.3gppnetwork.org
+127.0.3.4       smf.5gc.mnc010.mcc315.3gppnetwork.org
+127.0.3.15      bsf.5gc.mnc010.mcc315.3gppnetwork.org
+127.0.3.5       amf.5gc.mnc010.mcc315.3gppnetwork.org
+127.0.3.13      pcf.5gc.mnc010.mcc315.3gppnetwork.org
+127.0.3.20      udr.5gc.mnc010.mcc315.3gppnetwork.org
+# End of custom for open5gs
+
+# The following lines are desirable for IPv6 capable hosts
+::1     ip6-localhost ip6-loopback
+fe00::0 ip6-localnet
+ff00::0 ip6-mcastprefix
+ff02::1 ip6-allnodes
+ff02::2 ip6-allrouters
