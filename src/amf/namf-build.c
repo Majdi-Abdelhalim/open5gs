@@ -518,6 +518,89 @@ ogs_sbi_request_t *amf_namf_comm_build_create_ue_context(
 
                 ogs_info("[%s:%d] Added HR session to CreateUEContext",
                         amf_ue->supi, sess->psi);
+
+            /*
+             * LBO session path: UE at home with LBO-allowed session.
+             *
+             * Add to sessionContextList WITHOUT smf_service_instance_id
+             * so the target AMF can derive subscription data (S-NSSAI,
+             * DNN, lbo_roaming_allowed) from PduSessionContext entries.
+             *
+             * Per TS 29.518 §6.1.6.2.25, sessionContextList carries all
+             * PDU session contexts. The target AMF uses these to populate
+             * amf_ue->slice[] for PDU session re-establishment after
+             * handover, without non-standard custom multipart parts.
+             */
+            } else if (ue_at_home &&
+                    sess->lbo_roaming_allowed &&
+                    SESSION_CONTEXT_IN_SMF(sess)) {
+
+                OpenAPI_pdu_session_context_t *PduSessionCtx = NULL;
+                OpenAPI_snssai_t *sNSSAI = NULL;
+
+                sNSSAI = ogs_calloc(1, sizeof(*sNSSAI));
+                ogs_assert(sNSSAI);
+                sNSSAI->sst = sess->s_nssai.sst;
+                sNSSAI->sd =
+                        ogs_s_nssai_sd_to_string(sess->s_nssai.sd);
+
+                PduSessionCtx = OpenAPI_pdu_session_context_create(
+                        sess->psi,
+                        sess->sm_context_ref ?
+                            ogs_strdup(sess->sm_context_ref) : NULL,
+                        sNSSAI,
+                        sess->dnn ? ogs_strdup(sess->dnn) : NULL,
+                        NULL, /* selected_dnn */
+                        OpenAPI_access_type_3GPP_ACCESS,
+                        0, /* additional_access_type */
+                        NULL, /* allocated_ebi_list */
+                        NULL, /* hsmf_id */
+                        NULL, /* hsmf_set_id */
+                        NULL, /* hsmf_service_set_id */
+                        0, /* smf_binding */
+                        NULL, /* vsmf_id */
+                        NULL, /* vsmf_set_id */
+                        NULL, /* vsmf_service_set_id */
+                        0, /* vsmf_binding */
+                        NULL, /* ismf_id */
+                        NULL, /* ismf_set_id */
+                        NULL, /* ismf_service_set_id */
+                        0, /* ismf_binding */
+                        NULL, /* ns_instance */
+                        NULL, /* smf_service_instance_id (NULL = LBO) */
+                        false, 0, /* ma_pdu_session */
+                        NULL, /* cn_assisted_ran_para */
+                        NULL, /* nrf_management_uri */
+                        NULL, /* nrf_discovery_uri */
+                        NULL, /* nrf_access_token_uri */
+                        NULL, /* smf_binding_info */
+                        NULL, /* vsmf_binding_info */
+                        NULL, /* ismf_binding_info */
+                        NULL, /* additional_snssai */
+                        NULL, /* inter_plmn_api_root */
+                        NULL, /* pgw_fqdn */
+                        NULL, /* pgw_ip_addr */
+                        NULL, /* plmn_id */
+                        NULL, /* anchor_smf_supported_features */
+                        false, 0 /* anchor_smf_oauth2_required */
+                );
+                ogs_assert(PduSessionCtx);
+
+                if (!UeContext.session_context_list)
+                    UeContext.session_context_list =
+                            OpenAPI_list_create();
+                ogs_assert(UeContext.session_context_list);
+
+                OpenAPI_list_add(
+                        UeContext.session_context_list,
+                        PduSessionCtx);
+
+                ogs_info("[%s:%d] Added LBO session to "
+                        "CreateUEContext sessionContextList "
+                        "(S-NSSAI SST:%d DNN:%s)",
+                        amf_ue->supi, sess->psi,
+                        sess->s_nssai.sst,
+                        sess->dnn ? sess->dnn : "N/A");
             }
         }
     }

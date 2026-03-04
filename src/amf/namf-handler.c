@@ -1520,18 +1520,18 @@ OpenAPI_list_t *amf_namf_comm_encode_ue_mm_context_list(amf_ue_t *amf_ue)
 
     MmContext->access_type = (OpenAPI_access_type_e)amf_ue->nas.access_type;
 
-    if ((OpenAPI_ciphering_algorithm_e)amf_ue->selected_enc_algorithm &&
-        (OpenAPI_integrity_algorithm_e)amf_ue->selected_int_algorithm) {
-
+    if (amf_ue->security_context_available) {
         OpenAPI_nas_security_mode_t *NasSecurityMode;
 
         NasSecurityMode = ogs_calloc(1, sizeof(*NasSecurityMode));
         ogs_assert(NasSecurityMode);
 
+        /* NAS algorithm values (0=NEA0/NIA0, 1=NEA1/NIA1, 2=NEA2/NIA2) map to
+         * OpenAPI enum values offset by +1 (NULL=0, NEA0=1, NEA1=2, NEA2=3). */
         NasSecurityMode->ciphering_algorithm =
-                (OpenAPI_ciphering_algorithm_e)amf_ue->selected_enc_algorithm;
+                (OpenAPI_ciphering_algorithm_e)(amf_ue->selected_enc_algorithm + 1);
         NasSecurityMode->integrity_algorithm =
-                (OpenAPI_integrity_algorithm_e)amf_ue->selected_int_algorithm;
+                (OpenAPI_integrity_algorithm_e)(amf_ue->selected_int_algorithm + 1);
 
         MmContext->nas_security_mode = NasSecurityMode;
     }
@@ -1723,6 +1723,42 @@ void amf_namf_comm_decode_ue_mm_context_list(
                     amf_namf_comm_base64_decode_ue_security_capability(
                     MmContext->ue_security_capability);
         }
+
+        /*
+         * Restore NAS security mode (selected algorithms, NAS keys, counts).
+         * Required so the V-AMF can verify integrity of subsequent NAS
+         * messages (e.g. UplinkNASTransport after inter-PLMN N2 handover)
+         * without requiring a new Security Mode Command procedure.
+         */
+
+        /* Restore NAS access type (3GPP vs Non-3GPP) - required for
+         * MAC calculation which uses access type as bearer parameter. */
+        if (MmContext->access_type)
+            amf_ue->nas.access_type = (int)MmContext->access_type;
+
+        if (MmContext->nas_security_mode) {
+            /* OpenAPI enum value = NAS algorithm value + 1; reverse on decode. */
+            amf_ue->selected_int_algorithm =
+                (uint8_t)(MmContext->nas_security_mode->integrity_algorithm - 1);
+            amf_ue->selected_enc_algorithm =
+                (uint8_t)(MmContext->nas_security_mode->ciphering_algorithm - 1);
+
+            /* Derive NAS integrity and ciphering keys from KAMF */
+            ogs_kdf_nas_5gs(OGS_KDF_NAS_INT_ALG,
+                amf_ue->selected_int_algorithm,
+                amf_ue->kamf, amf_ue->knas_int);
+            ogs_kdf_nas_5gs(OGS_KDF_NAS_ENC_ALG,
+                amf_ue->selected_enc_algorithm,
+                amf_ue->kamf, amf_ue->knas_enc);
+
+            amf_ue->security_context_available = 1;
+        }
+
+        /* Restore NAS uplink/downlink counters */
+        if (MmContext->is_nas_downlink_count)
+            amf_ue->dl_count = (uint32_t)MmContext->nas_downlink_count;
+        if (MmContext->is_nas_uplink_count)
+            amf_ue->ul_count.i32 = (uint32_t)MmContext->nas_uplink_count;
     }
 }
 
@@ -2152,6 +2188,98 @@ int amf_namf_comm_handle_create_ue_context_request(
         amf_namf_comm_decode_ue_mm_context_list(
                 amf_ue, UeContext->mm_context_list);
 
+    /*
+     * Derive subscription data (slice/DNN info) from sessionContextList.
+     *
+     * Per TS 29.518 §6.1.6.2.25, sessionContextList carries all PDU
+     * session contexts. We use these to populate amf_ue->slice[] so
+     * the target AMF can process PDU Session Establishment requests
+     * after inter-AMF handover.
+     *
+     * HR sessions have smf_service_instance_id set (H-SMF URI) →
+     *   lbo_roaming_allowed = false
+     * LBO sessions do NOT have smf_service_instance_id →
+     *   lbo_roaming_allowed = true
+     *
+     * This replaces the previous non-standard custom cJSON multipart
+     * approach, using only standard-defined PduSessionContext fields.
+     */
+    if (UeContext->session_context_list) {
+        OpenAPI_lnode_t *node = NULL;
+
+        amf_ue->num_of_slice = 0;
+
+        OpenAPI_list_for_each(UeContext->session_context_list, node) {
+            OpenAPI_pdu_session_context_t *PduSessionCtx = node->data;
+            int si;
+            bool found_slice = false;
+            bool lbo;
+            uint8_t sst;
+            ogs_uint24_t sd;
+
+            if (!PduSessionCtx || !PduSessionCtx->s_nssai)
+                continue;
+
+            sst = PduSessionCtx->s_nssai->sst;
+            sd = ogs_s_nssai_sd_from_string(PduSessionCtx->s_nssai->sd);
+            lbo = (PduSessionCtx->smf_service_instance_id == NULL);
+
+            /* Find existing slice with matching S-NSSAI */
+            for (si = 0; si < amf_ue->num_of_slice; si++) {
+                if (amf_ue->slice[si].s_nssai.sst == sst &&
+                        amf_ue->slice[si].s_nssai.sd.v == sd.v) {
+                    found_slice = true;
+                    break;
+                }
+            }
+
+            if (!found_slice) {
+                if (amf_ue->num_of_slice >= OGS_MAX_NUM_OF_SLICE) {
+                    ogs_warn("Max slice count overflow");
+                    continue;
+                }
+                si = amf_ue->num_of_slice;
+                memset(&amf_ue->slice[si], 0,
+                        sizeof(amf_ue->slice[si]));
+                amf_ue->slice[si].s_nssai.sst = sst;
+                amf_ue->slice[si].s_nssai.sd = sd;
+                amf_ue->num_of_slice++;
+            }
+
+            /* Add DNN as a session within this slice */
+            if (PduSessionCtx->dnn) {
+                ogs_slice_data_t *slice = &amf_ue->slice[si];
+                int k;
+                bool dup = false;
+
+                /* Check for duplicate DNN */
+                for (k = 0; k < slice->num_of_session; k++) {
+                    if (slice->session[k].name &&
+                            !ogs_strcasecmp(slice->session[k].name,
+                                PduSessionCtx->dnn)) {
+                        dup = true;
+                        break;
+                    }
+                }
+
+                if (!dup && slice->num_of_session < OGS_MAX_NUM_OF_SESS) {
+                    ogs_session_t *session =
+                            &slice->session[slice->num_of_session];
+                    memset(session, 0, sizeof(*session));
+                    session->name = ogs_strdup(PduSessionCtx->dnn);
+                    session->lbo_roaming_allowed = lbo;
+                    slice->num_of_session++;
+                }
+            }
+        }
+
+        if (amf_ue->num_of_slice > 0) {
+            ogs_info("[%s] Derived subscription data from "
+                    "sessionContextList: %d slices",
+                    amf_ue->supi, amf_ue->num_of_slice);
+        }
+    }
+
     /* Set inter-AMF handover flag */
     amf_ue->inter_amf_handover = true;
 
@@ -2225,16 +2353,15 @@ int amf_namf_comm_handle_create_ue_context_request(
     bool vsmf_insertion_needed = false;
 
     if (UeContext->session_context_list) {
-        /* V-SMF insertion path */
+        /*
+         * session_context_list may contain both HR and LBO sessions.
+         * HR sessions (smf_service_instance_id set) need V-SMF insertion.
+         * LBO sessions are used for subscription data derivation only.
+         */
         OpenAPI_lnode_t *node = NULL;
-
-        vsmf_insertion_needed = true;
 
         OpenAPI_list_for_each(UeContext->session_context_list, node) {
             OpenAPI_pdu_session_context_t *PduSessionContext = node->data;
-            amf_sess_t *sess = NULL;
-            ogs_pkbuf_t *n2smbuf = NULL;
-            char content_id[32];
 
             if (!PduSessionContext) {
                 ogs_error("No PduSessionContext in session_context_list");
@@ -2254,76 +2381,97 @@ int amf_namf_comm_handle_create_ue_context_request(
                 continue;
             }
 
-            sess = amf_sess_add(amf_ue,
-                    PduSessionContext->pdu_session_id);
-            if (!sess) {
-                ogs_error("amf_sess_add(PSI:%d) failed",
-                        PduSessionContext->pdu_session_id);
-                continue;
-            }
-
-            /* Mark as home-routed */
-            sess->lbo_roaming_allowed = false;
-
-            /* Set S-NSSAI */
-            sess->s_nssai.sst = PduSessionContext->s_nssai->sst;
-            sess->s_nssai.sd = ogs_s_nssai_sd_from_string(
-                    PduSessionContext->s_nssai->sd);
-
-            /* Set DNN */
-            if (PduSessionContext->dnn)
-                sess->dnn = ogs_strdup(PduSessionContext->dnn);
-
-            /* Set access type */
-            if (PduSessionContext->access_type)
-                amf_ue->nas.access_type =
-                    (int)PduSessionContext->access_type;
-
             /*
-             * Store H-SMF URI from source AMF.
-             * smf_service_instance_id carries the H-SMF's base URI.
+             * HR session: smf_service_instance_id set (H-SMF URI).
+             * Create amf_sess_t and prepare for V-SMF insertion.
+             *
+             * LBO session: smf_service_instance_id NOT set.
+             * Do NOT create amf_sess_t — session will be released and
+             * re-established after handover. Subscription data
+             * (slice/DNN info) is derived above from the full
+             * sessionContextList.
              */
             if (PduSessionContext->smf_service_instance_id) {
+                amf_sess_t *sess = NULL;
+                ogs_pkbuf_t *n2smbuf = NULL;
+                char content_id[32];
+
+                vsmf_insertion_needed = true;
+
+                sess = amf_sess_add(amf_ue,
+                        PduSessionContext->pdu_session_id);
+                if (!sess) {
+                    ogs_error("amf_sess_add(PSI:%d) failed",
+                            PduSessionContext->pdu_session_id);
+                    continue;
+                }
+
+                /* Mark as home-routed */
+                sess->lbo_roaming_allowed = false;
+
+                /* Set S-NSSAI */
+                sess->s_nssai.sst = PduSessionContext->s_nssai->sst;
+                sess->s_nssai.sd = ogs_s_nssai_sd_from_string(
+                        PduSessionContext->s_nssai->sd);
+
+                /* Set DNN */
+                if (PduSessionContext->dnn)
+                    sess->dnn = ogs_strdup(PduSessionContext->dnn);
+
+                /* Set access type */
+                if (PduSessionContext->access_type)
+                    amf_ue->nas.access_type =
+                        (int)PduSessionContext->access_type;
+
+                /* Store H-SMF URI */
                 sess->handover_hsmf_uri =
                     ogs_strdup(PduSessionContext->smf_service_instance_id);
                 ogs_info("[%s:%d] H-SMF URI: %s",
                         amf_ue->supi, sess->psi,
                         sess->handover_hsmf_uri);
-            }
 
-            /* Store source H-SMF sm_context_ref for reference */
-            if (PduSessionContext->sm_context_ref) {
-                /* Don't use STORE_SESSION_CONTEXT — that's for V-SMF */
-                if (sess->sm_context_resource_uri)
-                    ogs_free(sess->sm_context_resource_uri);
-                sess->sm_context_resource_uri =
-                    ogs_strdup(PduSessionContext->sm_context_ref);
-            }
+                /* Store source H-SMF sm_context_ref for reference */
+                if (PduSessionContext->sm_context_ref) {
+                    if (sess->sm_context_resource_uri)
+                        ogs_free(sess->sm_context_resource_uri);
+                    sess->sm_context_resource_uri =
+                        ogs_strdup(PduSessionContext->sm_context_ref);
+                }
 
-            /* Extract gNB's HandoverRequiredTransfer from multipart */
-            ogs_snprintf(content_id, sizeof(content_id),
-                    "n2-sm-psi-%d", sess->psi);
+                /* Extract gNB's HandoverRequiredTransfer from multipart */
+                ogs_snprintf(content_id, sizeof(content_id),
+                        "n2-sm-psi-%d", sess->psi);
 
-            n2smbuf = ogs_sbi_find_part_by_content_id(
-                    recvmsg, content_id);
-            if (n2smbuf) {
-                ogs_pkbuf_t *n2buf_copy = NULL;
+                n2smbuf = ogs_sbi_find_part_by_content_id(
+                        recvmsg, content_id);
+                if (n2smbuf) {
+                    ogs_pkbuf_t *n2buf_copy = NULL;
 
-                n2buf_copy = ogs_pkbuf_alloc(NULL, n2smbuf->len);
-                ogs_assert(n2buf_copy);
-                ogs_pkbuf_put_data(n2buf_copy,
-                        n2smbuf->data, n2smbuf->len);
+                    n2buf_copy = ogs_pkbuf_alloc(NULL, n2smbuf->len);
+                    ogs_assert(n2buf_copy);
+                    ogs_pkbuf_put_data(n2buf_copy,
+                            n2smbuf->data, n2smbuf->len);
 
-                AMF_SESS_STORE_N2_TRANSFER(
-                        sess, handover_required_from_gnb, n2buf_copy);
+                    AMF_SESS_STORE_N2_TRANSFER(
+                            sess, handover_required_from_gnb, n2buf_copy);
 
-                ogs_info("[%s:%d] Stored gNB HandoverRequiredTransfer "
-                        "for V-SMF insertion at target AMF",
-                        amf_ue->supi, sess->psi);
+                    ogs_info("[%s:%d] Stored gNB HandoverRequiredTransfer "
+                            "for V-SMF insertion at target AMF",
+                            amf_ue->supi, sess->psi);
+                } else {
+                    ogs_warn("[%s:%d] No gNB HandoverRequiredTransfer "
+                            "in CreateUEContext",
+                            amf_ue->supi, sess->psi);
+                }
             } else {
-                ogs_warn("[%s:%d] No gNB HandoverRequiredTransfer "
-                        "in CreateUEContext",
-                        amf_ue->supi, sess->psi);
+                ogs_info("[%s:%d] LBO session in sessionContextList "
+                        "(S-NSSAI SST:%d DNN:%s) — subscription "
+                        "data derived, no V-SMF insertion",
+                        amf_ue->supi,
+                        PduSessionContext->pdu_session_id,
+                        PduSessionContext->s_nssai->sst,
+                        PduSessionContext->dnn ?
+                            PduSessionContext->dnn : "N/A");
             }
         }
     } else if (CreateData->pdu_session_list) {

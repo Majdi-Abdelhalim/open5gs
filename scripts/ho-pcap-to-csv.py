@@ -325,10 +325,13 @@ SBI_RULES = [
      "Phase 2 — HO Preparation", "Step 2d (H-AMF → V-AMF, 5 hops via SEPP)",
      "TS 29.518 §5.2.5.4 / TS 23.502 §4.23.7.3 Step 6"),
 
-    # ── V-SMF CreateSMContext PREPARING (via Visited PLMN SCP/SEPP/NF) ──────
+    # ── V-SMF CreateSMContext (via Visited PLMN SCP/SEPP/NF) ───────────────
+    # During HO preparation (HR): hoState=PREPARING for V-SMF insertion.
+    # After HO completion  (LBO): regular PDU session establishment.
+    # The post-processing step below reclassifies based on timing.
     (r"^/nsmf-pdusession/v1/sm-contexts$", "POST", "visited",
-     "Nsmf_PDUSession_CreateSMContext hoState=PREPARING (V-SMF)",
-     "V-AMF inserts V-SMF: CreateSMContext with hoState=PREPARING",
+     "Nsmf_PDUSession_CreateSMContext (V-SMF)",
+     "V-AMF sends CreateSMContext to V-SMF",
      "Phase 2 — HO Preparation (HR V-SMF Insertion)", "HR Step 3-4 (V-AMF → V-SMF via SCP2)",
      "TS 29.502 §5.2.2 / TS 23.502 §4.23.7.3 Step 7"),
 
@@ -848,6 +851,61 @@ def main() -> None:
                     r["step_ref"] = "Post-HO Data Path Verification"
                     r["spec_reference"] = ("TS 29.281 §7.1 / "
                                            "TS 23.502 §4.23.7.3 (post-HO)")
+
+    # Reclassify post-HandoverNotify SBI/PFCP messages for LBO handover.
+    # In LBO, after HO completion the V-AMF establishes NEW PDU sessions
+    # at the local V-SMF/V-UPF — these are not V-SMF insertion (HR) but
+    # regular PDU session establishment (LBO).
+    if ho_complete_ts is not None:
+        for r in all_records:
+            try:
+                ts = float(r["timestamp_sec"])
+            except (ValueError, TypeError):
+                continue
+            if ts <= ho_complete_ts:
+                continue
+
+            if (r["protocol"].startswith("SBI")
+                    and r["message_type"] ==
+                        "Nsmf_PDUSession_CreateSMContext (V-SMF)"):
+                r["message_type"] = (
+                    "Nsmf_PDUSession_CreateSMContext (LBO Session)")
+                r["description"] = (
+                    "V-AMF establishes new LBO PDU session at V-SMF "
+                    "(post-handover)")
+                r["phase"] = "Phase 3+ — Post-HO LBO Session Setup"
+                r["step_ref"] = (
+                    "LBO: V-AMF → V-SMF CreateSMContext (new session)")
+                r["spec_reference"] = (
+                    "TS 29.502 §5.2.2 / TS 23.502 §4.3.2")
+
+            elif (r["protocol"].startswith("SBI")
+                    and r["message_type"] ==
+                        "Nsmf_PDUSession_UpdateSMContext (V-SMF)"):
+                r["phase"] = "Phase 3+ — Post-HO LBO Session Setup"
+                r["step_ref"] = (
+                    "LBO: V-AMF → V-SMF UpdateSMContext (activate)")
+
+            elif (r["protocol"].startswith("PFCP")
+                    and "Establishment" in r["message_type"]
+                    and (is_visited_plmn(r["src_ip"])
+                         or is_visited_plmn(r["dst_ip"]))):
+                r["phase"] = "Phase 3+ — Post-HO LBO Session Setup"
+                r["description"] = (
+                    "V-SMF establishes N4 session at V-UPF "
+                    "(LBO post-handover)")
+                r["step_ref"] = "LBO N4 Setup (V-SMF → V-UPF)"
+
+            elif (r["protocol"].startswith("PFCP")
+                    and "Modification" in r["message_type"]
+                    and (is_visited_plmn(r["src_ip"])
+                         or is_visited_plmn(r["dst_ip"]))):
+                r["phase"] = "Phase 3+ — Post-HO LBO Session Setup"
+                r["description"] = (
+                    "V-SMF modifies V-UPF N4 session "
+                    "(LBO DL FAR activation)")
+                r["step_ref"] = (
+                    "LBO N4 Modification (V-SMF → V-UPF)")
 
     write_csv(all_records, output_csv)
 

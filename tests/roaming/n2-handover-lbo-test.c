@@ -239,7 +239,7 @@ static void perform_full_registration(abts_case *tc, test_ue_t *test_ue,
  * Helper: Establish PDU session
  */
 static test_sess_t *establish_pdu_session(abts_case *tc, test_ue_t *test_ue,
-        ogs_socknode_t *ngap, const char *dnn, uint8_t psi)
+        ogs_socknode_t *ngap, const char *dnn, uint8_t psi, int gnb_index)
 {
     int rv;
     ogs_pkbuf_t *gsmbuf, *gmmbuf, *sendbuf, *recvbuf;
@@ -247,6 +247,12 @@ static test_sess_t *establish_pdu_session(abts_case *tc, test_ue_t *test_ue,
 
     sess = test_sess_add_by_dnn_and_psi(test_ue, dnn, psi);
     ogs_assert(sess);
+
+    /* Set gNB N3 address based on which gNB we're connected to */
+    if (gnb_index == 2) {
+        sess->gnb_n3_addr = test_self()->gnb2_addr;
+        sess->gnb_n3_addr6 = test_self()->gnb2_addr6;
+    }
 
     sess->ul_nas_transport_param.request_type = OGS_NAS_5GS_REQUEST_TYPE_INITIAL;
     sess->ul_nas_transport_param.dnn = 1;
@@ -267,6 +273,9 @@ static test_sess_t *establish_pdu_session(abts_case *tc, test_ue_t *test_ue,
     recvbuf = testgnb_ngap_read(ngap);
     ABTS_PTR_NOTNULL(tc, recvbuf);
     testngap_recv(test_ue, recvbuf);
+    ABTS_INT_EQUAL(tc,
+            NGAP_ProcedureCode_id_PDUSessionResourceSetup,
+            test_ue->ngap_procedure_code);
 
     sendbuf = testngap_sess_build_pdu_session_resource_setup_response(sess);
     ABTS_PTR_NOTNULL(tc, sendbuf);
@@ -539,7 +548,7 @@ static void test1_func(abts_case *tc, void *data)
     perform_full_registration(tc, test_ue, ngap_home);
 
     /* PDU Session Establishment */
-    sess = establish_pdu_session(tc, test_ue, ngap_home, "internet", 5);
+    sess = establish_pdu_session(tc, test_ue, ngap_home, "internet", 5, 1);
 
     /* Verify data path in home network */
     qos_flow = test_qos_flow_find_by_qfi(sess, 1);
@@ -641,6 +650,12 @@ static void test1_func(abts_case *tc, void *data)
     test_ue->amf_ue_ngap_id = visiting_amf_ue_ngap_id;
     test_ue->ran_ue_ngap_id = visiting_ran_ue_ngap_id;
     test_ue->nr_cgi.cell_id = 0x40011;
+    /* Update TAI and CGI PLMN to visiting network (001-01) so that
+     * HandoverNotify and subsequent UplinkNASTransport carry the correct
+     * visiting TAI. Without this update, amf_find_served_tai() in V-AMF's
+     * UplinkNASTransport handler rejects the message with ErrorIndication. */
+    memcpy(&test_ue->nr_tai.plmn_id, &target_plmn, OGS_PLMN_ID_LEN);
+    memcpy(&test_ue->nr_cgi.plmn_id, &target_plmn, OGS_PLMN_ID_LEN);
 
     /* Step 7: Send HandoverNotify on target gNB */
     ogs_info("[TEST1] → Sending HandoverNotify on visiting gNB");
@@ -685,9 +700,12 @@ static void test1_func(abts_case *tc, void *data)
     /* Switch to visiting AMF context for session re-establishment */
     test_ue->amf_ue_ngap_id = visiting_amf_ue_ngap_id;
     test_ue->ran_ue_ngap_id = visiting_ran_ue_ngap_id;
+    /* Ensure nr_tai/nr_cgi PLMN reflect visiting network for UplinkNASTransport */
+    memcpy(&test_ue->nr_tai.plmn_id, &target_plmn, OGS_PLMN_ID_LEN);
+    memcpy(&test_ue->nr_cgi.plmn_id, &target_plmn, OGS_PLMN_ID_LEN);
 
     /* LBO: establish new PDU session via Visiting AMF → V-SMF (PSI 7) */
-    sess = establish_pdu_session(tc, test_ue, ngap_visiting, "internet", 7);
+    sess = establish_pdu_session(tc, test_ue, ngap_visiting, "internet", 7, 2);
 
     /* Verify GTP-U data path in visiting network */
     verify_gtpu_post_handover(tc, gtpu_visiting, sess, "TEST1");
@@ -811,7 +829,7 @@ static void test2_func(abts_case *tc, void *data)
     perform_full_registration(tc, test_ue, ngap_home);
 
     /* PDU Session Establishment */
-    establish_pdu_session(tc, test_ue, ngap_home, "internet", 5);
+    establish_pdu_session(tc, test_ue, ngap_home, "internet", 5, 1);
 
     TIMING_PHASE_END("TEST2", "Setup + Registration", t_phase);
 
@@ -880,6 +898,8 @@ static void test2_func(abts_case *tc, void *data)
     test_ue->amf_ue_ngap_id = visiting_amf_ue_ngap_id;
     test_ue->ran_ue_ngap_id = visiting_ran_ue_ngap_id;
     test_ue->nr_cgi.cell_id = 0x40021;
+    memcpy(&test_ue->nr_tai.plmn_id, &target_plmn, OGS_PLMN_ID_LEN);
+    memcpy(&test_ue->nr_cgi.plmn_id, &target_plmn, OGS_PLMN_ID_LEN);
 
     /* Send HandoverNotify on target gNB */
     ogs_info("[TEST2] → Sending HandoverNotify on visiting gNB");
@@ -919,12 +939,14 @@ static void test2_func(abts_case *tc, void *data)
     /* Switch to visiting AMF context for session re-establishment */
     test_ue->amf_ue_ngap_id = visiting_amf_ue_ngap_id;
     test_ue->ran_ue_ngap_id = visiting_ran_ue_ngap_id;
+    memcpy(&test_ue->nr_tai.plmn_id, &target_plmn, OGS_PLMN_ID_LEN);
+    memcpy(&test_ue->nr_cgi.plmn_id, &target_plmn, OGS_PLMN_ID_LEN);
 
     /* LBO: establish new PDU session via Visiting AMF → V-SMF (PSI 7) */
     {
         test_sess_t *new_sess;
         new_sess = establish_pdu_session(tc, test_ue, ngap_visiting,
-                "internet", 7);
+                "internet", 7, 2);
         verify_gtpu_post_handover(tc, gtpu_visiting, new_sess, "TEST2");
     }
 
@@ -1053,7 +1075,7 @@ static void test3_func(abts_case *tc, void *data)
 
     /* PDU Session 1: Internet */
     ogs_info("[TEST3] Establishing PDU session 1: internet");
-    sess = establish_pdu_session(tc, test_ue, ngap_home, "internet", 5);
+    sess = establish_pdu_session(tc, test_ue, ngap_home, "internet", 5, 1);
 
     /* Attempt second PDU session: IMS */
     ogs_info("[TEST3] Attempting second PDU session: ims");
@@ -1157,6 +1179,8 @@ static void test3_func(abts_case *tc, void *data)
     test_ue->amf_ue_ngap_id = visiting_amf_ue_ngap_id;
     test_ue->ran_ue_ngap_id = visiting_ran_ue_ngap_id;
     test_ue->nr_cgi.cell_id = 0x40011;
+    memcpy(&test_ue->nr_tai.plmn_id, &target_plmn, OGS_PLMN_ID_LEN);
+    memcpy(&test_ue->nr_cgi.plmn_id, &target_plmn, OGS_PLMN_ID_LEN);
 
     /* Send HandoverNotify on target gNB */
     ogs_info("[TEST3] → Sending HandoverNotify on visiting gNB");
@@ -1196,12 +1220,14 @@ static void test3_func(abts_case *tc, void *data)
     /* Switch to visiting AMF context for session re-establishment */
     test_ue->amf_ue_ngap_id = visiting_amf_ue_ngap_id;
     test_ue->ran_ue_ngap_id = visiting_ran_ue_ngap_id;
+    memcpy(&test_ue->nr_tai.plmn_id, &target_plmn, OGS_PLMN_ID_LEN);
+    memcpy(&test_ue->nr_cgi.plmn_id, &target_plmn, OGS_PLMN_ID_LEN);
 
     /* LBO: establish new PDU session via Visiting AMF → V-SMF (PSI 7) */
     {
         test_sess_t *new_sess;
         new_sess = establish_pdu_session(tc, test_ue, ngap_visiting,
-                "internet", 7);
+                "internet", 7, 2);
         verify_gtpu_post_handover(tc, gtpu_visiting, new_sess, "TEST3");
     }
 
@@ -1340,7 +1366,7 @@ static void test4_func(abts_case *tc, void *data)
     ogs_info("[TEST4] ========================================");
 
     perform_full_registration(tc, test_ue, ngap_home);
-    sess = establish_pdu_session(tc, test_ue, ngap_home, "internet", 5);
+    sess = establish_pdu_session(tc, test_ue, ngap_home, "internet", 5, 1);
 
     qos_flow = test_qos_flow_find_by_qfi(sess, 1);
     ogs_assert(qos_flow);
@@ -1599,7 +1625,7 @@ static void test5_func(abts_case *tc, void *data)
     ogs_info("[TEST5] ========================================");
 
     perform_full_registration(tc, test_ue, ngap_home);
-    sess = establish_pdu_session(tc, test_ue, ngap_home, "internet", 5);
+    sess = establish_pdu_session(tc, test_ue, ngap_home, "internet", 5, 1);
 
     qos_flow = test_qos_flow_find_by_qfi(sess, 1);
     ogs_assert(qos_flow);

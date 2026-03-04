@@ -4928,6 +4928,16 @@ void ngap_handle_handover_notification(
 
         amf_ue_associate_ran_ue(amf_ue, target_ue);
 
+        /*
+         * Mark initial context setup as already done. The UE security/radio
+         * context was established at the source gNB before handover and has
+         * been transferred to the target gNB via the NGAP handover procedure.
+         * Subsequent PDU session establishment must therefore use
+         * PDUSessionResourceSetupRequest (code 29), not
+         * InitialContextSetupRequest (code 4).
+         */
+        target_ue->initial_context_setup_request_sent = true;
+
         /* Copy Stream-No/TAI/ECGI from ran_ue */
         amf_ue->gnb_ostream_id = target_ue->gnb_ostream_id;
         memcpy(&amf_ue->nr_tai,
@@ -4980,6 +4990,16 @@ void ngap_handle_handover_notification(
                         amf_ue->supi, sess->psi);
             }
         }
+
+        /*
+         * Transition to registered state: the UE was already authenticated
+         * and registered at H-AMF when N14 context was transferred. After
+         * inter-AMF handover completes, V-AMF must be in gmm_state_registered
+         * so that subsequent NAS messages (e.g. UL NAS TRANSPORT for PDU
+         * session establishment) are handled correctly by the registered
+         * state handler, rather than being treated as a new registration.
+         */
+        OGS_FSM_TRAN(&amf_ue->sm, &gmm_state_registered);
 
         return;
     }
