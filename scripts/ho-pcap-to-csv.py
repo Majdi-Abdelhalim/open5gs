@@ -366,6 +366,13 @@ SBI_RULES = [
      "Phase 3/4 — HO Completion/Cleanup", "HR: V-SMF → H-SMF via SEPP chain",
      "TS 29.502 §5.2.3 / TS 23.502 §4.23.7.3"),
 
+    # ── V-SMF → H-SMF HsmfUpdateData (PATCH pdu-sessions/{id}) ──────────────
+    (r"^/nsmf-pdusession/v1/pdu-sessions/[^/]+$", "PATCH", None,
+     "Nsmf_PDUSession_HsmfUpdateData (V-SMF → H-SMF)",
+     "V-SMF sends DL CN tunnel info to H-SMF after COMPLETED path switch",
+     "Phase 3 — HO Completion", "HR Step: V-SMF → H-SMF HsmfUpdateData via SEPP",
+     "TS 29.502 §5.2.3 / TS 23.502 §4.23.7.3 Step 18"),
+
     # ── H-SMF PDU session release ─────────────────────────────────────────────
     (r"^/nsmf-pdusession/v1/sm-contexts/[^/]+/release$", "POST", None,
      "Nsmf_PDUSession_Release (H-SMF)",
@@ -504,10 +511,21 @@ def classify_pfcp(info: str, src_ip: str, dst_ip: str) -> tuple[str, str, str, s
     src_ent = entity(src_ip)
     dst_ent = entity(dst_ip)
     if "Modification" in info_key:
-        if src_ent in ("H-SMF", "H-UPF") or dst_ent in ("H-UPF", "H-SMF"):
-            if dst_ent == "H-UPF" or src_ent == "H-SMF":
-                description = ("H-SMF modifies H-UPF N4 session"
-                               " (DL path setup or H-UPF update after V-SMF)")
+        if dst_ent == "V-UPF" or src_ent == "V-UPF":
+            description = ("V-SMF modifies V-UPF N4 session"
+                           " (UL FAR + DL path switch after COMPLETED)")
+            phase = "Phase 3 — HO Completion (HR)"
+            step_ref = "HR N4 V-UPF Path Switch"
+            spec = "TS 29.244 §7.5 / TS 23.502 §4.23.7.3 Step 18"
+        elif dst_ent == "H-UPF" or src_ent == "H-UPF":
+            description = ("H-SMF modifies PSA-UPF N4 session"
+                           " (DL FAR → V-UPF N3 addr after HsmfUpdateData)")
+            phase = "Phase 3 — HO Completion (HR)"
+            step_ref = "HR N4 PSA-UPF DL Update"
+            spec = "TS 29.244 §7.5 / TS 23.502 §4.23.7.3 Step 18"
+        elif src_ent in ("H-SMF",) or dst_ent in ("H-SMF",):
+            description = ("H-SMF modifies H-UPF N4 session"
+                           " (DL path setup or H-UPF update after V-SMF)")
     if "Establishment" in info_key:
         src_ent = entity(src_ip)
         if src_ent == "V-SMF":
@@ -656,33 +674,81 @@ def extract_pfcp(pcap: str) -> list[dict]:
 
 
 def extract_gtp(pcap: str) -> list[dict]:
-    """Extract GTP-U/GPRS messages (data plane indicator)."""
+    """Extract GTP-U messages with type differentiation and direction."""
     rows = fields_cmd(
         pcap,
         "gtp",
         [
             "frame.number", "frame.time_relative",
             "ip.src", "ip.dst", "udp.dstport",
+            "gtp.message_type", "gtp.teid",
             "_ws.col.Info",
         ],
     )
+    # GTP-U message type codes (TS 29.281 §6)
+    GTP_MSG_TYPES = {
+        "1":   ("Echo Request",     "GTP-U echo keepalive from peer",
+                "N3 GTP-U Echo",    "TS 29.281 §7.2.1"),
+        "2":   ("Echo Response",    "GTP-U echo response to peer",
+                "N3 GTP-U Echo",    "TS 29.281 §7.2.2"),
+        "26":  ("Error Indication", "GTP-U error: unknown TEID or missing tunnel",
+                "N3 GTP-U Error",   "TS 29.281 §7.3.1"),
+        "254": ("End Marker",       "GTP-U end marker for data forwarding during HO",
+                "N3 End Marker",    "TS 29.281 §7.4 / TS 23.502 §4.9.1.3"),
+        "255": ("T-PDU",            "GTP-U user data (T-PDU)",
+                "N3 GTP-U T-PDU",   "TS 29.281 §7.1 / TS 38.415"),
+    }
+
     records = []
     for r in rows:
-        fnum, ts, src, dst, port, info = r[:6]
+        fnum, ts, src, dst, port, msg_type_code, teid, info = r[:8]
+
+        # Classify by GTP-U message type
+        type_info = GTP_MSG_TYPES.get(msg_type_code.strip())
+        if type_info:
+            msg_type, description, step_ref, spec = type_info
+        else:
+            msg_type = info.strip() or f"GTP-U (type {msg_type_code})"
+            description = "Unknown GTP-U message type"
+            step_ref = "N3 GTP-U"
+            spec = "TS 29.281"
+
+        # Determine direction based on src/dst entities
+        src_ent = entity(src)
+        dst_ent = entity(dst)
+        if src_ent in ("SRC-gNB", "TGT-gNB") and dst_ent in ("H-UPF", "V-UPF"):
+            direction = "UL"
+            description = f"{description} [{direction}: {src_ent} → {dst_ent}]"
+        elif src_ent in ("H-UPF", "V-UPF") and dst_ent in ("SRC-gNB", "TGT-gNB"):
+            direction = "DL"
+            description = f"{description} [{direction}: {src_ent} → {dst_ent}]"
+        elif src_ent in ("V-UPF",) and dst_ent in ("H-UPF",):
+            direction = "UL-N9"
+            description = f"{description} [{direction}: {src_ent} → {dst_ent}]"
+        elif src_ent in ("H-UPF",) and dst_ent in ("V-UPF",):
+            direction = "DL-N9"
+            description = f"{description} [{direction}: {src_ent} → {dst_ent}]"
+        else:
+            direction = ""
+
+        if teid:
+            description = f"{description} TEID=0x{int(teid):08x}" if teid.isdigit() \
+                else f"{description} TEID={teid}"
+
         records.append({
             "frame_number":  fnum,
             "timestamp_sec": ts,
             "src_ip":        src,
-            "src_entity":    entity(src),
+            "src_entity":    src_ent,
             "dst_ip":        dst,
-            "dst_entity":    entity(dst),
+            "dst_entity":    dst_ent,
             "port":          port,
             "protocol":      "GTP-U (UDP)",
-            "message_type":  info.strip() or "GTP-U",
-            "description":   "User-plane GTP data / echo (N3 data path)",
+            "message_type":  msg_type,
+            "description":   description,
             "phase":         "Phase 1+ — Data Path",
-            "step_ref":      "N3 GTP-U data",
-            "spec_reference": "TS 29.281 / TS 38.415",
+            "step_ref":      step_ref,
+            "spec_reference": spec,
         })
     return records
 
@@ -759,6 +825,29 @@ def main() -> None:
     gtp_records = extract_gtp(pcap)
 
     all_records = merge_sort(ngap_records + sbi_records + pfcp_records + gtp_records)
+
+    # Post-process: reclassify GTP-U T-PDU messages after HandoverNotify as
+    # post-handover data path verification
+    ho_complete_ts = None
+    for r in all_records:
+        if r["message_type"] == "HandoverNotify":
+            try:
+                ho_complete_ts = float(r["timestamp_sec"])
+            except (ValueError, TypeError):
+                pass
+    if ho_complete_ts is not None:
+        for r in all_records:
+            if (r["protocol"] == "GTP-U (UDP)"
+                    and r["message_type"] == "T-PDU"):
+                try:
+                    ts = float(r["timestamp_sec"])
+                except (ValueError, TypeError):
+                    continue
+                if ts > ho_complete_ts:
+                    r["phase"] = "Phase 3+ — Post-HO Verification"
+                    r["step_ref"] = "Post-HO Data Path Verification"
+                    r["spec_reference"] = ("TS 29.281 §7.1 / "
+                                           "TS 23.502 §4.23.7.3 (post-HO)")
 
     write_csv(all_records, output_csv)
 
