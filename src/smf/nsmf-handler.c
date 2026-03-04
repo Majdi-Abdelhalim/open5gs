@@ -1109,6 +1109,20 @@ bool smf_nsmf_handle_update_sm_context(
                 if (HOME_ROUTED_ROAMING_IN_VSMF(sess)) {
                     pfcp_flags |= OGS_PFCP_MODIFY_HOME_ROUTED_ROAMING;
                     pfcp_flags |= OGS_PFCP_MODIFY_OUTER_HEADER_REMOVAL;
+
+                    /*
+                     * For V-SMF insertion during inter-PLMN HR handover,
+                     * the UL FAR (V-UPF → H-UPF via N9) was set up in
+                     * memory after receiving the H-SMF 201 response
+                     * (hcnTunnelInfo), but the PFCP Session Establishment
+                     * happened before that (to get the V-UPF F-TEID for
+                     * the HsmfCreateData). So the V-UPF UL FAR doesn't
+                     * have the outer header creation to H-UPF yet.
+                     *
+                     * Include UL FAR in this PFCP modification so that
+                     * the V-UPF can forward UL traffic to H-UPF.
+                     */
+                    pfcp_flags |= OGS_PFCP_MODIFY_UL_ONLY;
                 }
 
                 ogs_assert(OGS_OK ==
@@ -1862,32 +1876,52 @@ bool smf_nsmf_handle_create_data_in_hsmf_ho(
     /* Store V-SMF's VCN tunnel info (V-UPF's N9 endpoint) */
     vcnTunnelInfo = PduSessionCreateData->vcn_tunnel_info;
     if (vcnTunnelInfo) {
-        memset(&sess->remote_dl_ip, 0, sizeof(sess->remote_dl_ip));
+        /*
+         * Stage V-UPF N9 tunnel info in sess->handover.* instead of
+         * overwriting sess->remote_dl_* (which still holds the source
+         * gNB address). The H-UPF DL FAR must keep pointing to the
+         * source gNB until COMPLETED, when the ACTIVATED handler will
+         * detect the change and send PFCP modification to H-UPF.
+         *
+         * Without this staging, sess->remote_dl_ip is prematurely set
+         * to V-UPF N9 during PREPARING. Then when COMPLETED arrives
+         * with the same V-UPF N9 in vcnTunnelInfo, the comparison in
+         * the ACTIVATED handler sees no difference and skips the PFCP
+         * update — leaving H-UPF DL FAR pointing at the old gNB.
+         */
+        memset(&sess->handover.remote_dl_ip, 0,
+                sizeof(sess->handover.remote_dl_ip));
         if (vcnTunnelInfo->ipv4_addr) {
             rv = ogs_ipv4_from_string(
-                    &sess->remote_dl_ip.addr, vcnTunnelInfo->ipv4_addr);
+                    &sess->handover.remote_dl_ip.addr,
+                    vcnTunnelInfo->ipv4_addr);
             if (rv == OGS_OK) {
-                sess->remote_dl_ip.ipv4 = 1;
-                sess->remote_dl_ip.len = OGS_IPV4_LEN;
+                sess->handover.remote_dl_ip.ipv4 = 1;
+                sess->handover.remote_dl_ip.len = OGS_IPV4_LEN;
             }
         }
         if (vcnTunnelInfo->ipv6_addr) {
             rv = ogs_ipv6addr_from_string(
-                    sess->remote_dl_ip.addr6, vcnTunnelInfo->ipv6_addr);
+                    sess->handover.remote_dl_ip.addr6,
+                    vcnTunnelInfo->ipv6_addr);
             if (rv == OGS_OK) {
-                sess->remote_dl_ip.ipv6 = 1;
-                sess->remote_dl_ip.len = OGS_IPV6_LEN;
+                sess->handover.remote_dl_ip.ipv6 = 1;
+                sess->handover.remote_dl_ip.len = OGS_IPV6_LEN;
             }
         }
-        if (sess->remote_dl_ip.ipv4 && sess->remote_dl_ip.ipv6)
-            sess->remote_dl_ip.len = OGS_IPV4V6_LEN;
+        if (sess->handover.remote_dl_ip.ipv4 &&
+                sess->handover.remote_dl_ip.ipv6)
+            sess->handover.remote_dl_ip.len = OGS_IPV4V6_LEN;
 
         if (vcnTunnelInfo->gtp_teid)
-            sess->remote_dl_teid =
+            sess->handover.remote_dl_teid =
                 ogs_uint64_from_string_hexadecimal(vcnTunnelInfo->gtp_teid);
 
-        ogs_info("[%s:%d] H-SMF HO: V-UPF N9 tunnel stored "
-                "(teid=0x%x)", smf_ue->supi, sess->psi, sess->remote_dl_teid);
+        sess->handover.prepared = true;
+
+        ogs_info("[%s:%d] H-SMF HO: V-UPF N9 tunnel staged "
+                "(teid=0x%x)", smf_ue->supi, sess->psi,
+                sess->handover.remote_dl_teid);
     }
 
     if (PduSessionCreateData->vsmf_id) {

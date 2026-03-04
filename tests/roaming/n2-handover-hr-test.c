@@ -588,6 +588,10 @@ static void test1_func(abts_case *tc, void *data)
      * Target gNB allocates DL N3 F-TEID for each admitted session.
      * T-AMF will forward this to V-SMF via UpdateSMContext(PREPARED). */
     ogs_info("[HR-TEST1] Step 8: → HandoverRequestAck (with sessions)");
+    /* Swap gNB N3 address to target gNB (gNB2) so the
+     * HandoverRequestAckTransfer carries the correct DL tunnel */
+    { test_sess_t *s; ogs_list_for_each(&test_ue->sess_list, s)
+        s->gnb_n3_addr = test_self()->gnb2_addr; }
     sendbuf = testngap_build_handover_request_ack(test_ue);
     ABTS_PTR_NOTNULL(tc, sendbuf);
     rv = testgnb_ngap_send(ngap_visiting, sendbuf);
@@ -832,6 +836,8 @@ static void test2_func(abts_case *tc, void *data)
 
     /* HandoverRequestAck WITH sessions (V-SMF will receive PREPARED) */
     ogs_info("[HR-TEST2] → HandoverRequestAck (with sessions)");
+    { test_sess_t *s; ogs_list_for_each(&test_ue->sess_list, s)
+        s->gnb_n3_addr = test_self()->gnb2_addr; }
     sendbuf = testngap_build_handover_request_ack(test_ue);
     ABTS_PTR_NOTNULL(tc, sendbuf);
     rv = testgnb_ngap_send(ngap_visiting, sendbuf);
@@ -1108,6 +1114,8 @@ static void test3_func(abts_case *tc, void *data)
     visiting_amf_ue_ngap_id = test_ue->amf_ue_ngap_id;
 
     /* HandoverRequestAck WITH all sessions (V-SMF will receive PREPARED) */
+    { test_sess_t *s; ogs_list_for_each(&test_ue->sess_list, s)
+        s->gnb_n3_addr = test_self()->gnb2_addr; }
     sendbuf = testngap_build_handover_request_ack(test_ue);
     ABTS_PTR_NOTNULL(tc, sendbuf);
     rv = testgnb_ngap_send(ngap_visiting, sendbuf);
@@ -1389,6 +1397,9 @@ static void test4_func(abts_case *tc, void *data)
     /* Step 6: Send HandoverRequestAck WITH PDU sessions
      * T-AMF forwards to V-SMF as UpdateSMContext(PREPARED) */
     ogs_info("[HR-TEST4] → HandoverRequestAck (with sessions)");
+    ogs_list_for_each(&test_ue->sess_list, sess) {
+        sess->gnb_n3_addr = test_self()->gnb2_addr;
+    }
     sendbuf = testngap_build_handover_request_ack(test_ue);
     ABTS_PTR_NOTNULL(tc, sendbuf);
     rv = testgnb_ngap_send(ngap_visiting, sendbuf);

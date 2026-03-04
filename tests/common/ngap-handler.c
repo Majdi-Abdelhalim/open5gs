@@ -611,6 +611,8 @@ void testngap_handle_handover_request(
 
     NGAP_PDUSessionResourceSetupRequestTransfer_t n2sm_message;
     NGAP_PDUSessionResourceSetupRequestTransferIEs_t *ie2 = NULL;
+    NGAP_UPTransportLayerInformation_t *UPTransportLayerInformation = NULL;
+    NGAP_GTPTunnel_t *gTPTunnel = NULL;
     OCTET_STRING_t *transfer = NULL;
     ogs_pkbuf_t *n2smbuf = NULL;
 
@@ -630,6 +632,7 @@ void testngap_handle_handover_request(
             break;
         case NGAP_ProtocolIE_ID_id_PDUSessionResourceSetupListHOReq:
             PDUSessionList = &ie->value.choice.PDUSessionResourceSetupListHOReq;
+            break;
         default:
             break;
         }
@@ -666,6 +669,19 @@ void testngap_handle_handover_request(
                 switch (ie2->id) {
                 case NGAP_ProtocolIE_ID_id_DataForwardingNotPossible:
                     sess->handover.data_forwarding_not_possible = true;
+                    break;
+                case NGAP_ProtocolIE_ID_id_UL_NGU_UP_TNLInformation:
+                    UPTransportLayerInformation =
+                        &ie2->value.choice.UPTransportLayerInformation;
+                    gTPTunnel =
+                        UPTransportLayerInformation->choice.gTPTunnel;
+                    ogs_assert(gTPTunnel);
+
+                    ogs_asn_BIT_STRING_to_ip(
+                            &gTPTunnel->transportLayerAddress,
+                            &sess->upf_n3_ip);
+                    ogs_asn_OCTET_STRING_to_uint32(
+                            &gTPTunnel->gTP_TEID, &sess->upf_n3_teid);
                     break;
                 default:
                     break;

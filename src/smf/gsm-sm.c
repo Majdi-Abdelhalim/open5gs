@@ -1212,6 +1212,24 @@ void smf_gsm_state_operational(ogs_fsm_t *s, smf_event_t *e)
      */
                                 bool far_update = false;
 
+                                /*
+                                 * For V-SMF insertion during inter-PLMN N2
+                                 * handover (§4.23.7.3): the PREPARING handler
+                                 * staged the V-UPF N9 tunnel in
+                                 * sess->handover.*. Apply it now so the
+                                 * H-UPF DL FAR switches from the old source
+                                 * gNB to the V-UPF N9 tunnel.
+                                 */
+                                if (sess->handover.prepared) {
+                                    memcpy(&sess->remote_dl_ip,
+                                            &sess->handover.remote_dl_ip,
+                                            sizeof(sess->remote_dl_ip));
+                                    sess->remote_dl_teid =
+                                        sess->handover.remote_dl_teid;
+                                    sess->handover.prepared = false;
+                                    far_update = true;
+                                }
+
                                 if (memcmp(
                                         &sess->nsmf_param.dl_ip,
                                         &sess->remote_dl_ip,
